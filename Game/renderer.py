@@ -1,19 +1,32 @@
 from __future__ import annotations
 
+import math
+
 import pygame
 
-from .constants import BOARD_LEFT, BOARD_SIZE, BOARD_TOP, SQUARE_SIZE, WHITE
+from .constants import (
+    BOARD_VIEW_PIXELS,
+    BOARD_LEFT,
+    BOARD_TOP,
+    SQUARE_SIZE,
+    VIEW_SIZE,
+    WHITE,
+)
 from .effects import Effects, SoftGlowEffects
 from .models import Move, Piece
 from .rules import ChessGame
+from .textures import SceneTextures
 
 class BoardRenderer:
-    def __init__(self, effects: Effects | None = None) -> None:
+    def __init__(
+        self,
+        effects: Effects | None = None,
+        textures: SceneTextures | None = None,
+    ) -> None:
         self.effects = effects or SoftGlowEffects()
-        self.font = pygame.font.SysFont("segoeui", 38, bold=True)
-        self.coordinate_font = pygame.font.SysFont("segoeui", 14, bold=True)
-        self.light_square = (232, 222, 201)
-        self.dark_square = (102, 126, 112)
+        self.textures = textures or SceneTextures()
+        self.coordinate_font = pygame.font.SysFont("segoeui", 9, bold=True)
+        self.glyph_font = pygame.font.SysFont("segoeuisymbol", 32)
 
     def draw(
         self,
@@ -23,20 +36,49 @@ class BoardRenderer:
         legal_moves: list[Move],
         checked_king: tuple[int, int] | None,
         now: float,
+        mines: dict[tuple[int, int], str] | None = None,
+        health_animations: dict[
+            tuple[int, int], tuple[int, int, float]
+        ] | None = None,
+        damage_popups: list[tuple[tuple[int, int], int, float]] | None = None,
+        camera: tuple[float, float] = (0, 0),
+        *,
+        square_size: int = SQUARE_SIZE,
+        board_origin: tuple[int, int] = (BOARD_LEFT, BOARD_TOP),
     ) -> None:
         destinations = {move.end for move in legal_moves}
-        for row in range(BOARD_SIZE):
-            for col in range(BOARD_SIZE):
+        mines = mines or {}
+        health_animations = health_animations or {}
+        damage_popups = damage_popups or []
+        camera_row, camera_col = camera
+        origin_x, origin_y = board_origin
+        board_size = game.board_size
+        self.textures.draw_background(surface)
+        previous_clip = surface.get_clip()
+        surface.set_clip(
+            pygame.Rect(
+                BOARD_LEFT,
+                BOARD_TOP,
+                BOARD_VIEW_PIXELS,
+                BOARD_VIEW_PIXELS,
+            )
+        )
+        for row in range(
+            max(0, math.floor(camera_row)),
+            min(board_size, math.ceil(camera_row + VIEW_SIZE)),
+        ):
+            for col in range(
+                max(0, math.floor(camera_col)),
+                min(board_size, math.ceil(camera_col + VIEW_SIZE)),
+            ):
                 rect = pygame.Rect(
-                    BOARD_LEFT + col * SQUARE_SIZE,
-                    BOARD_TOP + row * SQUARE_SIZE,
-                    SQUARE_SIZE,
-                    SQUARE_SIZE,
+                    round(origin_x + (col - camera_col) * square_size),
+                    round(origin_y + (row - camera_row) * square_size),
+                    square_size,
+                    square_size,
                 )
                 is_light = (row + col) % 2 == 0
-                pygame.draw.rect(
-                    surface, self.light_square if is_light else self.dark_square, rect
-                )
+                self.textures.draw_board_square(surface, rect, light=is_light)
                 piece = game.board[row][col]
                 is_selected = selected == (row, col)
                 is_checked = checked_king == (row, col)
@@ -49,41 +91,158 @@ class BoardRenderer:
                 )
                 if (row, col) in destinations:
                     self._draw_destination(surface, rect, piece is not None)
+                if (row, col) in mines:
+                    self._draw_mine(surface, rect)
                 if piece is not None:
-                    self._draw_piece(surface, rect, piece)
+                    self._draw_piece(
+                        surface,
+                        rect,
+                        piece,
+                        health_animations.get((row, col)),
+                        now,
+                    )
                 if col == 0:
                     label = self.coordinate_font.render(
-                        str(8 - row), True, (35, 48, 43)
+                        str(board_size - row), True, (35, 48, 43)
                     )
                     surface.blit(label, (rect.x + 4, rect.y + 3))
-                if row == 7:
+                if row == board_size - 1:
                     label = self.coordinate_font.render(
-                        chr(ord("a") + col), True, (35, 48, 43)
+                        str(col + 1), True, (35, 48, 43)
                     )
                     surface.blit(
                         label,
                         (rect.right - label.get_width() - 4, rect.bottom - 18),
                     )
+        self._draw_damage_popups(
+            surface, damage_popups, now, camera, square_size, board_origin
+        )
+        surface.set_clip(previous_clip)
 
     def _draw_piece(
-        self, surface: pygame.Surface, rect: pygame.Rect, piece: Piece
+        self,
+        surface: pygame.Surface,
+        rect: pygame.Rect,
+        piece: Piece,
+        health_animation: tuple[int, int, float] | None,
+        now: float,
     ) -> None:
         center = rect.center
-        radius = 28
+        radius = max(3, rect.width // 3)
         if piece.color == WHITE:
-            fill, ink, border = (250, 247, 237), (41, 52, 48), (67, 79, 71)
+            fill, highlight, ink = (226, 217, 193), (255, 250, 228), (41, 52, 48)
         else:
-            fill, ink, border = (43, 54, 51), (244, 236, 216), (27, 35, 33)
-        pygame.draw.circle(surface, border, center, radius + 3)
+            fill, highlight, ink = (43, 54, 51), (91, 108, 98), (244, 236, 216)
+        pygame.draw.circle(surface, (22, 29, 27), (center[0], center[1] + 1), radius + 1)
+        pygame.draw.circle(surface, (166, 132, 73), center, radius + 1)
         pygame.draw.circle(surface, fill, center, radius)
-        glyph = self.font.render(piece.kind, True, ink)
+        pygame.draw.circle(
+            surface,
+            highlight,
+            (center[0] - radius // 3, center[1] - radius // 3),
+            max(2, radius // 2),
+            1,
+        )
+        glyphs = {
+            WHITE: {
+                "K": "\u2654", "Q": "\u2655", "R": "\u2656",
+                "B": "\u2657", "N": "\u2658", "P": "\u2659",
+            },
+            "black": {
+                "K": "\u265a", "Q": "\u265b", "R": "\u265c",
+                "B": "\u265d", "N": "\u265e", "P": "\u265f",
+            },
+        }
+        glyph = self.glyph_font.render(glyphs[piece.color][piece.kind], True, ink)
+        glyph_size = max(8, rect.width - 2)
+        glyph = pygame.transform.smoothscale(glyph, (glyph_size, glyph_size))
         surface.blit(glyph, glyph.get_rect(center=center))
+        health_width = max(6, rect.width - 4)
+        health_height = max(1, rect.height // 8)
+        health_rect = pygame.Rect(
+            rect.centerx - health_width // 2,
+            rect.bottom - health_height - 1,
+            health_width,
+            health_height,
+        )
+        pygame.draw.rect(surface, (31, 37, 34), health_rect)
+        ratio = self._health_ratio(piece, health_animation, now)
+        if ratio > 0:
+            health_color = (
+                int(224 * (1 - ratio) + 72 * ratio),
+                int(65 * (1 - ratio) + 190 * ratio),
+                70,
+            )
+            fill_rect = health_rect.copy()
+            fill_rect.width = max(1, int(health_width * ratio))
+            pygame.draw.rect(surface, health_color, fill_rect)
+        if piece.upgrades:
+            pygame.draw.circle(
+                surface,
+                (245, 194, 75),
+                (rect.right - 4, rect.y + 4),
+                max(1, rect.width // 12),
+            )
 
     @staticmethod
     def _draw_destination(
         surface: pygame.Surface, rect: pygame.Rect, is_capture: bool
     ) -> None:
         if is_capture:
-            pygame.draw.circle(surface, (51, 56, 49), rect.center, 34, width=4)
+            pygame.draw.circle(
+                surface,
+                (51, 56, 49),
+                rect.center,
+                max(2, rect.width // 2 - 2),
+                width=2,
+            )
         else:
-            pygame.draw.circle(surface, (51, 56, 49), rect.center, 9)
+            pygame.draw.circle(
+                surface, (51, 56, 49), rect.center, max(2, rect.width // 8)
+            )
+
+    @staticmethod
+    def _draw_mine(surface: pygame.Surface, rect: pygame.Rect) -> None:
+        center = (rect.right - 5, rect.y + 5)
+        pygame.draw.circle(surface, (35, 24, 24), center, 4)
+        pygame.draw.circle(surface, (210, 70, 57), center, 3)
+        pygame.draw.circle(surface, (255, 219, 125), center, 1)
+
+    @staticmethod
+    def _health_ratio(
+        piece: Piece,
+        animation: tuple[int, int, float] | None,
+        now: float,
+    ) -> float:
+        if animation is None:
+            return max(0.0, min(1.0, (piece.health or 0) / piece.max_health))
+        start, end, started_at = animation
+        progress = min(1.0, max(0.0, (now - started_at) / 0.45))
+        eased = progress * progress * (3 - 2 * progress)
+        health = start + (end - start) * eased
+        return max(0.0, min(1.0, health / piece.max_health))
+
+    @staticmethod
+    def _draw_damage_popups(
+        surface: pygame.Surface,
+        popups: list[tuple[tuple[int, int], int, float]],
+        now: float,
+        camera: tuple[float, float],
+        square_size: int,
+        board_origin: tuple[int, int],
+    ) -> None:
+        font = pygame.font.SysFont("segoeui", max(9, square_size // 2), bold=True)
+        origin_x, origin_y = board_origin
+        for (row, col), damage, started_at in popups:
+            progress = (now - started_at) / 0.65
+            if not 0 <= progress < 1:
+                continue
+            label = font.render(f"-{damage}", True, (255, 110, 95))
+            label.set_alpha(round(255 * (1 - progress)))
+            position = (
+                round(origin_x + (col - camera[1]) * square_size)
+                + (square_size - label.get_width()) // 2,
+                round(origin_y + (row - camera[0]) * square_size)
+                - int(progress * square_size),
+            )
+            surface.blit(label, position)
