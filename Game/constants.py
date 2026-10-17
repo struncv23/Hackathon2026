@@ -1,0 +1,9 @@
+BOARD_SIZE = 8
+SQUARE_SIZE = 80
+BOARD_LEFT = 40
+BOARD_TOP = 60
+WINDOW_SIZE = (1040, 760)
+
+WHITE = "white"
+BLACK = "black"
+PROMOTION_PIECES = ("Q", "R", "B", "N")
