@@ -87,11 +87,14 @@ def _search(
 def _evaluate(game: ChessGame) -> int:
     score = 0
     center = (game.board_size - 1) / 2
+    king_positions: dict[str, tuple[int, int]] = {}
     for row in range(game.board_size):
         for col in range(game.board_size):
             piece = game.board[row][col]
             if piece is None:
                 continue
+            if piece.kind == "K":
+                king_positions[piece.color] = (row, col)
             sign = 1 if piece.color == BLACK else -1
             health = (piece.health or 0) / piece.max_health
             material = PIECE_VALUES[piece.kind] * (0.65 + 0.35 * health)
@@ -105,6 +108,17 @@ def _evaluate(game: ChessGame) -> int:
             if piece.color == WHITE and piece.upgrades:
                 score -= 35 * len(piece.upgrades)
     score += 2 * (game.team_health[BLACK] - game.team_health[WHITE])
+    if len(king_positions) == 2:
+        white_king = king_positions[WHITE]
+        black_king = king_positions[BLACK]
+        for (loot_row, loot_col), value in game.loot.items():
+            white_distance = abs(white_king[0] - loot_row) + abs(
+                white_king[1] - loot_col
+            )
+            black_distance = abs(black_king[0] - loot_row) + abs(
+                black_king[1] - loot_col
+            )
+            score += (white_distance - black_distance) * (value // 50)
     return score
 
 

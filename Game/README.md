@@ -16,7 +16,8 @@ Zavislosti jsou uvedene v `requirements.txt`.
 - `app.py` — hlavni smycka, vstup z klavesnice/mysi a herni panel.
 - `renderer.py` — vykresleni sachovnice a figurek.
 - `effects.py` — rozhrani a vychozi efekt pro oznacene pole a sach.
-- `constants.py` — ceny vylepseni a hodnoty figurek.
+- `constants.py` — rozmery, ceny a hodnoty figurek.
+- `campaign.py` — ekonomika, mesta, farmy, armady a ulozeni kralovstvi.
 
 Po spusteni se zobrazi hlavni menu. Z nej lze spustit/pokracovat ve hre,
 zacit novou hru nebo aplikaci ukoncit. Behem partie vede tlacitko **Menu**
@@ -25,21 +26,34 @@ jen zrusi.
 
 ## Kampan
 
-- Hra zacina levelem 1 na standardni sachovnici 8 x 8 se zakladnimi 16
-  figurkami na kazde strane. Nahodne armady a RPG nabor jsou vypnute.
-- Vyhra v prvnim levelu nastane, kdyz souper prijde alespon o polovinu sveho
-  pocatecniho tymoveho zdravi (HP). Pri standardni sestave je cil 2050 HP.
-  Po vyhre se odemkne level 2; odemceni zustane ulozene i po restartu hry.
-- Level 2 je RPG mapa 25 x 25. Kazde strane se nahodne prida dalsich 20
-  figurek (bez dalsiho krale), po cele mape na volna pole. Vyhra nastane,
-  kdyz souper ztrati vsechny figurky.
-- Koleckem mysi lze priblizovat a oddalovat zobrazeni; deska se sama
-  neposouva.
-- V levelu 2 muze bily hrac naverbovat pesaka, kone, strelce, vez nebo damu.
-  Cena je dvojnasobek hodnoty figurky; nova jednotka se objevi na volnem poli
-  pobliz bile zakladny. Nakup spotrebuje tah a cerny bot nakupovat nemuze.
-- Maximalni tymove HP se pri zahajeni vypocita z nasazene armady a pri nakupu
-  se zvysi o maximalni HP nove jednotky.
+- Hra zacina uvodni valkou na sachovnici 8 x 8. Vyhrat lze porazenim krale
+  nebo ztratou ctvrtiny tymoveho zdravi soupere. Kralovstvi lze spustit primo
+  z menu; tlacitko **Restartovat kralovstvi** zalozi novou kampan.
+- Kralovstvi je pruzkumna mapa 20 x 20 se dvema kraly, plnym tymovym zdravim
+  30 000 HP a 350 mincemi na kazde strane. Klasicka cast zustava oddelena.
+- Poklady s hodnotou 300 az 1500 minci se objevuji na mape. Vzdy je aktivni
+  jen jeden; kazdy dalsi nalezeny ma vyssi hodnotu. Sbira ho kral.
+- Mapa kralovstvi vyplnuje obrazovku bez praveho panelu. Kral, farmy, mesto i
+  zbrojnice jsou na jedne mape; kazda budova ma pudorys 3 x 4 pole.
+- Pokus krale vstoupit do pudorysu budovy rovnou otevre celou obrazovku obchodu;
+  kral zustane stat pred budovou. Farmu lze koupit rovnou kliknutim.
+- Prvni nakup za 250 minci odemkne farmarsky sektor a zalozi prvni farmu.
+  Mesto lze koupit az po trech farmach; zbrojnice az po meste a trech vojaccich.
+- Kazda farma prubezne generuje 3 mince za sekundu realneho casu.
+  Hrac i bot si tak vydelavaji soucasne.
+- Figuru lze vybrat kliknutim, pretahnout mysi nebo posouvat kralem pomoci WASD.
+  Mesto najima pouze pesaky za 800 minci, bez dalsiho potvrzeni.
+  Tahem prazdneho mista se posouva cela mapa; koleckem mysi se meni zoom.
+- Mesto stoji 900 minci po splneni podminky tri farem a odemyka primy najem
+  pesaku za 800 minci. Vylepseni musi jit po rade pesec, kun, strelec, vez, dama.
+  Armada ma limit 16 jednotek; pesce lze vylepsit na silnejsi figuru.
+- Zbrojnice stoji 3 000 minci. V ni se vybere velikost oddilu (1-8); do bitvy
+  se berou nejsilnejsi dostupne jednotky. Padem armady souper prijde o jednotky,
+  prezivsi se vraci a vitez ziska 250 minci navic.
+- Hrac i bot rozvijeji kralovstvi soucasne. Bot postupne kupuje farmy, odemyka
+  mesto, buduje a vylepsuje armadu a stavi zbrojnici; utoci vlastnim kralem na
+  poklady. Obtiznost ridi i hloubku jeho sachovych tahu.
+- Ekonomicke tahy nelze vratit.
 
 ## Vymena textur
 
@@ -61,12 +75,13 @@ textury; pro vymenu staci nahradit PNG soubory a hru znovu spustit.
   odhad, ne o oficialni ekvivalenci chess.com ratingu; tezka obtiznost
   prohledava tahy do vetsi hloubky. Pred tahem premysli nahodne 1 az 3
   sekundy; behem cekani se zobrazuje stav premysleni a hra zustava ovladatelna.
-- Bezny utok dava polovinu hodnoty utocici figury: pesec 50, kun/strelec
-  150, vez 250, dama 450, kral 100 poskozeni. Dama porazi na jeden zasah
-  pesce, kone a strelce, ale ne vez ani damu. Pri vyrazeni figury klesne
+- Maximalni HP a odmena za vyrazeni: pesec 50, kun/strelec 150,
+  vez 250, kral 600, dama 450.
+- Bezny utok dava polovinu hodnoty utocici figury: pesec 25, kun/strelec
+  75, vez 125, dama 200, kral 300 poskozeni. Dama porazi krale na tri zasahy.
+  Hra konci ihned po porazce krale, neni nutne dobirat zbytek armady.
+  Pri vyrazeni figury klesne
   tymove zdravi o jeji zbyvajici HP a utocnik ziska coiny podle jeji hodnoty.
-- Maximalni HP a odmena za vyrazeni: pesec 100, kun/strelec 300,
-  vez 500, kral 200, dama 900.
 - Upgrady muze kupovat a pouzivat pouze bily hrac. Kupuje se pro vybranou
   figuru a aktivuje se pri jejim kazdem tahu. Mina dava 200 HP poskozeni, odrazeny strelec
   ubere prvni dalsi figure na diagonale 99 HP a rentgen veze ubere vsem
@@ -75,11 +90,11 @@ textury; pro vymenu staci nahradit PNG soubory a hru znovu spustit.
   souperova krale. Upgradovany kral vytvori pesce na volnem poli pred sebou.
 - Vybrana bila dama muze byt obetovana; jeji zbyvajici HP se prida do
   tymoveho zdravi bileho hrace. Bot nepouziva upgrady ani schopnosti.
-- V levelu 1 rozhoduje ztrata alespon poloviny pocatecniho tymoveho HP; v
-  levelu 2 je potreba odstranit vsechny souperovy figurky. Sach a pat se
-  nepouzivaji.
-- `Ctrl+Z` nebo tlacitko **Vratit tah** vrati posledni tah nebo nakup
-  upgradu/naboru vcetne HP, min, penez a figurek.
+- V uvodni valce rozhoduje ztrata alespon poloviny pocatecniho tymoveho HP;
+  v bitve kralovstvi je potreba porazit souperova krale. Sach a pat se
+  nepouzivaji a pesec se nepromenuje.
+- `Ctrl+Z` nebo tlacitko **Vratit tah** vrati bojovy tah vcetne HP, min,
+  penez a figurek. Ekonomicke tahy kampane vratit nelze.
 - Pokud hrac nema zadny dostupny tah, muze stisknout `P` a tah preskocit.
 - Zasahy kratce animuji ubytek HP, tymovy ukazatel zdravi a cislo poskozeni
   nad zasazenym polem.

@@ -45,9 +45,16 @@ class BoardRenderer:
         *,
         square_size: int = SQUARE_SIZE,
         board_origin: tuple[int, int] = (BOARD_LEFT, BOARD_TOP),
+        loot: dict[tuple[int, int], int] | None = None,
+        shop_tiles: dict[tuple[int, int], str] | None = None,
+        buildings: dict[tuple[int, int], tuple[str, str, bool]] | None = None,
+        viewport_rect: pygame.Rect | None = None,
     ) -> None:
         destinations = {move.end for move in legal_moves}
         mines = mines or {}
+        loot = loot or {}
+        shop_tiles = shop_tiles or {}
+        buildings = buildings or {}
         health_animations = health_animations or {}
         damage_popups = damage_popups or []
         camera_row, camera_col = camera
@@ -56,7 +63,8 @@ class BoardRenderer:
         self.textures.draw_background(surface)
         previous_clip = surface.get_clip()
         surface.set_clip(
-            pygame.Rect(
+            viewport_rect
+            or pygame.Rect(
                 BOARD_LEFT,
                 BOARD_TOP,
                 BOARD_VIEW_PIXELS,
@@ -93,6 +101,10 @@ class BoardRenderer:
                     self._draw_destination(surface, rect, piece is not None)
                 if (row, col) in mines:
                     self._draw_mine(surface, rect)
+                if (row, col) in loot:
+                    self._draw_loot(surface, rect, loot[(row, col)])
+                if (row, col) in shop_tiles:
+                    self._draw_shop_tile(surface, rect, shop_tiles[(row, col)])
                 if piece is not None:
                     self._draw_piece(
                         surface,
@@ -114,10 +126,91 @@ class BoardRenderer:
                         label,
                         (rect.right - label.get_width() - 4, rect.bottom - 18),
                     )
+        self._draw_buildings(surface, buildings, camera, square_size, board_origin)
         self._draw_damage_popups(
             surface, damage_popups, now, camera, square_size, board_origin
         )
         surface.set_clip(previous_clip)
+
+    @staticmethod
+    def _draw_loot(surface: pygame.Surface, rect: pygame.Rect, value: int) -> None:
+        center = (rect.centerx, rect.centery)
+        radius = max(4, rect.width // 4)
+        pygame.draw.circle(surface, (71, 54, 22), center, radius + 1)
+        pygame.draw.circle(surface, (231, 185, 70), center, radius)
+        label = pygame.font.SysFont("segoeui", max(8, rect.width // 3), bold=True)
+        image = label.render(str(value // 100), True, (58, 45, 22))
+        surface.blit(image, image.get_rect(center=center))
+
+    @staticmethod
+    def _draw_shop_tile(surface: pygame.Surface, rect: pygame.Rect, kind: str) -> None:
+        colors = {
+            "farm": (89, 137, 79),
+            "city": (87, 125, 145),
+            "armory": (163, 93, 73),
+            "recruit": (164, 137, 74),
+            "upgrade": (133, 107, 158),
+            "war": (151, 71, 67),
+        }
+        pygame.draw.rect(surface, (31, 37, 34), rect)
+        inset = rect.inflate(-4, -4)
+        pygame.draw.rect(surface, colors.get(kind, (110, 110, 110)), inset)
+        abbreviations = {
+            "farm": "F",
+            "city": "M",
+            "armory": "Z",
+            "recruit": "+",
+            "upgrade": "^",
+            "war": "!",
+        }
+        font = pygame.font.SysFont("segoeui", max(9, rect.width // 2), bold=True)
+        label = font.render(abbreviations.get(kind, "?"), True, (255, 247, 220))
+        surface.blit(label, label.get_rect(center=rect.center))
+
+    @staticmethod
+    def _draw_buildings(
+        surface: pygame.Surface,
+        buildings: dict[tuple[int, int], tuple[str, str, bool]],
+        camera: tuple[float, float],
+        square_size: int,
+        board_origin: tuple[int, int],
+    ) -> None:
+        groups: dict[tuple[str, str, bool], list[tuple[int, int]]] = {}
+        for square, building in buildings.items():
+            groups.setdefault(building, []).append(square)
+
+        names = {"farm": "FARMA", "city": "MESTO", "armory": "ZBROJNICE"}
+        palettes = {
+            "farm": ((57, 92, 54), (113, 164, 86)),
+            "city": ((55, 76, 96), (103, 147, 172)),
+            "armory": ((103, 58, 50), (174, 98, 76)),
+        }
+        for (kind, owner, owned), squares in groups.items():
+            rows = [square[0] for square in squares]
+            cols = [square[1] for square in squares]
+            top, left = min(rows), min(cols)
+            rect = pygame.Rect(
+                round(board_origin[0] + (left - camera[1]) * square_size),
+                round(board_origin[1] + (top - camera[0]) * square_size),
+                (max(cols) - left + 1) * square_size,
+                (max(rows) - top + 1) * square_size,
+            )
+            unowned_color, owned_color = palettes[kind]
+            color = owned_color if owned else unowned_color
+            if owner == "black":
+                color = tuple(max(0, channel - 18) for channel in color)
+            pygame.draw.rect(surface, (25, 31, 28), rect)
+            pygame.draw.rect(surface, color, rect.inflate(-3, -3))
+            for row in range(1, 4):
+                y = rect.y + row * square_size
+                pygame.draw.line(surface, (34, 42, 37), (rect.x, y), (rect.right, y), 2)
+            for col in range(1, 3):
+                x = rect.x + col * square_size
+                pygame.draw.line(surface, (34, 42, 37), (x, rect.y), (x, rect.bottom), 2)
+            font = pygame.font.SysFont("segoeui", max(8, square_size // 2), bold=True)
+            label = font.render(names[kind], True, (255, 246, 222))
+            label.set_alpha(255 if owned else 145)
+            surface.blit(label, label.get_rect(center=rect.center))
 
     def _draw_piece(
         self,
