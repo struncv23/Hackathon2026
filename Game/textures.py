@@ -26,7 +26,7 @@ class SceneTextures:
         size = surface.get_size()
         background = self._background_scaled.get(size)
         if background is None:
-            background = pygame.transform.smoothscale(self._background, size)
+            background = pygame.transform.scale(self._background, size)
             self._background_scaled[size] = background
         surface.blit(background, (0, 0))
 
@@ -36,11 +36,14 @@ class SceneTextures:
         key = (rect.width, light)
         tile = self._board_tiles.get(key)
         if tile is None:
-            tile = pygame.transform.smoothscale(self._board, (rect.width, rect.height))
-            tint = (245, 235, 208) if light else (117, 139, 121)
+            tile = pygame.transform.scale(self._board, (rect.width, rect.height))
+            tint = (224, 201, 153) if light else (92, 119, 104)
             tile.fill((*tint, 255), special_flags=pygame.BLEND_RGBA_MULT)
             self._board_tiles[key] = tile
         surface.blit(tile, rect)
+        edge = (152, 119, 75) if light else (54, 76, 68)
+        pygame.draw.line(surface, edge, rect.bottomleft, rect.bottomright, 1)
+        pygame.draw.line(surface, edge, rect.topright, rect.bottomright, 1)
 
     def _load_or_create(
         self,
@@ -59,10 +62,15 @@ class SceneTextures:
         for _ in range(size[0] * size[1] // 3):
             offset = rng.randint(-18, 18)
             color = tuple(max(0, min(255, channel + offset)) for channel in base_color)
-            pygame.draw.circle(
+            block = rng.choice((2, 3, 4))
+            pygame.draw.rect(
                 texture,
                 color,
-                (rng.randrange(size[0]), rng.randrange(size[1])),
-                rng.choice((1, 1, 2, 3)),
+                (
+                    rng.randrange(size[0]) // block * block,
+                    rng.randrange(size[1]) // block * block,
+                    block,
+                    block,
+                ),
             )
         return texture

@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from .constants import (
     BLACK,
     BOARD_SIZE,
+    FARM_INCOME_PER_SECOND,
+    LOOT_FARM_SECONDS,
     PURCHASE_COSTS,
     RANDOM_EXTRA_PIECES_PER_SIDE,
     PIECE_VALUES,
@@ -17,7 +19,7 @@ from .models import Move, Piece
 ATTACK_DAMAGE = {
     kind: value // 2 for kind, value in PIECE_VALUES.items()
 }
-ATTACK_DAMAGE["Q"] = 200
+ATTACK_DAMAGE["Q"] = 100
 UPGRADE_DAMAGE = {"B": 99, "R": 199}
 MINE_DAMAGE = 200
 
@@ -34,7 +36,6 @@ class _GameSnapshot:
     loot: dict[tuple[int, int], int]
     shop_tiles: dict[tuple[int, int], str]
     building_tiles: dict[tuple[int, int], tuple[str, str]]
-    loot_rank: int
     last_loot_value: int
     last_loot_color: str | None
     team_health: dict[str, int]
@@ -52,16 +53,22 @@ class ChessGame:
         capture_majority: bool = False,
         king_only: bool = False,
         starting_coins: int = 0,
+        campaign_map: bool = False,
+        piece_health_multiplier: float = 1.0,
     ) -> None:
-        if board_size < 8:
-            raise ValueError("The board must be at least 8 by 8.")
+        if board_size < 6 or (board_size < 8 and not king_only):
+            raise ValueError("Standard boards must be at least 8 by 8; boss battles use 6 by 6.")
         if starting_coins < 0:
             raise ValueError("Starting coins cannot be negative.")
+        if not 0 < piece_health_multiplier <= 1:
+            raise ValueError("Piece health multiplier must be greater than 0 and at most 1.")
         self.board_size = board_size
         self.random_armies = random_armies
         self.capture_majority = capture_majority
         self.king_only = king_only
+        self.campaign_map = campaign_map
         self.starting_coins = starting_coins
+        self.piece_health_multiplier = piece_health_multiplier
         self.standard_start_col = (board_size - 8) // 2
         self.standard_black_back_row = (board_size - 8) // 2
         self.standard_white_back_row = self.standard_black_back_row + 7
@@ -73,9 +80,9 @@ class ChessGame:
         self.coins = {WHITE: 0, BLACK: 0}
         self.mines: dict[tuple[int, int], str] = {}
         self.loot: dict[tuple[int, int], int] = {}
+        self.loot_reserved_squares: set[tuple[int, int]] = set()
         self.shop_tiles: dict[tuple[int, int], str] = {}
         self.building_tiles: dict[tuple[int, int], tuple[str, str]] = {}
-        self.loot_rank = 1
         self.last_loot_value = 0
         self.last_loot_color: str | None = None
         self.team_health = {WHITE: 0, BLACK: 0}
@@ -92,8 +99,9 @@ class ChessGame:
         self.building_tiles = {}
         if self.king_only:
             center_col = self.board_size // 2
-            self.board[5][center_col] = Piece(BLACK, "K")
-            self.board[self.board_size - 6][center_col] = Piece(WHITE, "K")
+            if not self.campaign_map:
+                self.board[5][center_col] = self._new_piece(BLACK, "K")
+            self.board[self.board_size - 6][center_col] = self._new_piece(WHITE, "K")
             for color, base_start, gate_row in (
                 (BLACK, 0, 4),
                 (WHITE, self.board_size - 4, self.board_size - 5),
@@ -111,10 +119,10 @@ class ChessGame:
             white_pawn_row = self.standard_white_back_row - 1
             for offset, kind in enumerate(back_rank):
                 col = self.standard_start_col + offset
-                self.board[self.standard_black_back_row][col] = Piece(BLACK, kind)
-                self.board[self.standard_white_back_row][col] = Piece(WHITE, kind)
-                self.board[black_pawn_row][col] = Piece(BLACK, "P")
-                self.board[white_pawn_row][col] = Piece(WHITE, "P")
+                self.board[self.standard_black_back_row][col] = self._new_piece(BLACK, kind)
+                self.board[self.standard_white_back_row][col] = self._new_piece(WHITE, kind)
+                self.board[black_pawn_row][col] = self._new_piece(BLACK, "P")
+                self.board[white_pawn_row][col] = self._new_piece(WHITE, "P")
 
         if self.random_armies and not self.king_only:
             self._spawn_random_armies()
@@ -122,17 +130,16 @@ class ChessGame:
         self.castling_rights = {"K", "Q", "k", "q"}
         self.en_passant_target = None
         self.captured = {WHITE: [], BLACK: []}
-        self.coins = {WHITE: self.starting_coins, BLACK: self.starting_coins}
+        self.coins = {WHITE: self.starting_coins, BLACK: 0}
         self.mines = {}
         self.loot = {}
-        self.loot_rank = 1
         if self.king_only:
-            self._spawn_loot(1)
+            self._spawn_loot(3)
         self.last_loot_value = 0
         self.last_loot_color = None
         total_health = {
             color: sum(
-                piece.max_health
+                piece.health or 0
                 for row in self.board
                 for piece in row
                 if piece is not None and piece.color == color
@@ -152,26 +159,39 @@ class ChessGame:
         self.last_damage = []
         self.history = []
 
+    def _new_piece(self, color: str, kind: str) -> Piece:
+        health = max(1, round(PIECE_VALUES[kind] * self.piece_health_multiplier))
+        return Piece(color, kind, health=health)
+
     def configure_battle(self, armies: dict[str, dict[str, int]]) -> None:
         self.board = [[None] * self.board_size for _ in range(self.board_size)]
         self.shop_tiles = {}
         self.building_tiles = {}
         center = self.board_size // 2
-        black_king = (1, center)
-        white_king = (self.board_size - 2, center)
-        self.board[black_king[0]][black_king[1]] = Piece(BLACK, "K")
-        self.board[white_king[0]][white_king[1]] = Piece(WHITE, "K")
+        if self.board_size == 6:
+            black_king = (0, center)
+            white_king = (self.board_size - 1, center)
+            home_rows = {
+                BLACK: range(1, 3),
+                WHITE: range(self.board_size - 3, self.board_size - 1),
+            }
+            home_cols = range(1, self.board_size - 1)
+        else:
+            black_king = (1, center)
+            white_king = (self.board_size - 2, center)
+            home_rows = {
+                BLACK: range(1, 5),
+                WHITE: range(self.board_size - 5, self.board_size - 1),
+            }
+            home_cols = range(max(0, center - 4), min(self.board_size, center + 5))
+        self.board[black_king[0]][black_king[1]] = self._new_piece(BLACK, "K")
+        self.board[white_king[0]][white_king[1]] = self._new_piece(WHITE, "K")
 
         for color in (WHITE, BLACK):
-            home_rows = (
-                range(self.board_size - 5, self.board_size - 1)
-                if color == WHITE
-                else range(1, 5)
-            )
             positions = [
                 (row, col)
-                for row in home_rows
-                for col in range(max(0, center - 4), min(self.board_size, center + 5))
+                for row in home_rows[color]
+                for col in home_cols
                 if self.board[row][col] is None
             ]
             unit_index = 0
@@ -180,10 +200,11 @@ class ChessGame:
                     if unit_index >= len(positions):
                         raise ValueError("Too many units for this battle map.")
                     row, col = positions[unit_index]
-                    self.board[row][col] = Piece(color, kind)
+                    self.board[row][col] = self._new_piece(color, kind)
                     unit_index += 1
 
         self.king_only = False
+        self.campaign_map = False
         self.random_armies = False
         self.capture_majority = False
         self.turn = WHITE
@@ -194,12 +215,11 @@ class ChessGame:
         self.mines = {}
         self.loot = {}
         self.shop_tiles = {}
-        self.loot_rank = 1
         self.last_loot_value = 0
         self.last_loot_color = None
         self.team_health_max = {
             color: sum(
-                piece.max_health
+                piece.health or 0
                 for row in self.board
                 for piece in row
                 if piece is not None and piece.color == color
@@ -226,21 +246,35 @@ class ChessGame:
         )
         for index, (row, col) in enumerate(spawn_squares):
             color = BLACK if index < RANDOM_EXTRA_PIECES_PER_SIDE else WHITE
-            self.board[row][col] = Piece(color, rng.choice(extra_kinds))
+            self.board[row][col] = self._new_piece(color, rng.choice(extra_kinds))
 
-    def _spawn_loot(self, count: int) -> None:
-        if self.loot:
-            return
+    def _spawn_loot(
+        self,
+        count: int,
+        blocked_squares: set[tuple[int, int]] | None = None,
+    ) -> None:
+        spawn_rows = range(self.board_size)
+        if self.king_only:
+            first_row = max(0, self.board_size - 14)
+            last_row = min(self.board_size, self.board_size - 6)
+            spawn_rows = range(first_row, last_row)
+        blocked_squares = blocked_squares or set()
         available = [
             (row, col)
-            for row in range(self.board_size)
+            for row in spawn_rows
             for col in range(self.board_size)
             if self.board[row][col] is None and (row, col) not in self.loot
             and (row, col) not in self.shop_tiles
             and (row, col) not in self.building_tiles
+            and (row, col) not in self.loot_reserved_squares
+            and (row, col) not in blocked_squares
         ]
-        for square in random.sample(available, min(count, len(available))):
-            self.loot[square] = random.choice((300, 600, 1_000, 1_500)) * self.loot_rank
+        target_count = max(0, count)
+        needed = max(0, target_count - len(self.loot))
+        for square in random.sample(available, min(needed, len(available))):
+            self.loot[square] = round(
+                FARM_INCOME_PER_SECOND * LOOT_FARM_SECONDS * 0.6
+            )
 
     def piece_at(self, square: tuple[int, int]) -> Piece | None:
         row, col = square
@@ -277,23 +311,13 @@ class ChessGame:
             )
             for color in (WHITE, BLACK)
         }
+        if self.campaign_map:
+            has_king[BLACK] = True
         if not has_king[WHITE] and not has_king[BLACK]:
             return "draw"
         if not has_king[WHITE]:
             return BLACK
         if not has_king[BLACK]:
-            return WHITE
-
-        health_victories = {
-            color: self.capture_majority
-            and self.team_health[color] <= self.victory_health_threshold[color]
-            for color in (WHITE, BLACK)
-        }
-        if health_victories[WHITE] and health_victories[BLACK]:
-            return "draw"
-        if health_victories[WHITE]:
-            return BLACK
-        if health_victories[BLACK]:
             return WHITE
 
         has_pieces = {
@@ -304,6 +328,8 @@ class ChessGame:
             )
             for color in (WHITE, BLACK)
         }
+        if self.campaign_map:
+            has_pieces[BLACK] = True
         if not has_pieces[WHITE] and not has_pieces[BLACK]:
             return "draw"
         if not has_pieces[WHITE]:
@@ -325,8 +351,6 @@ class ChessGame:
             )
             if not loser_has_king:
                 return f"{self._side_name(winner)} vyhrali — padl souperuv kral."
-            if self.capture_majority:
-                return f"{self._side_name(winner)} vyhrali — souper ztratil dost zdravi."
             return f"{self._side_name(winner)} vyhrali — souper nema zadne figurky."
         if not self.all_legal_moves():
             return f"{self._side_name(self.turn)} nemaji tah — stiskni P pro preskoceni."
@@ -388,10 +412,11 @@ class ChessGame:
 
         self._save_history()
         square = random.choice(spawn_squares)
-        self.board[square[0]][square[1]] = Piece(WHITE, kind)
+        new_piece = self._new_piece(WHITE, kind)
+        self.board[square[0]][square[1]] = new_piece
         self.coins[WHITE] -= cost
-        self.team_health_max[WHITE] += PIECE_VALUES[kind]
-        self.team_health[WHITE] += PIECE_VALUES[kind]
+        self.team_health_max[WHITE] += new_piece.health or 0
+        self.team_health[WHITE] += new_piece.health or 0
         self.turn = BLACK
         return True
 
@@ -475,7 +500,7 @@ class ChessGame:
             king_start_col = self.standard_start_col + 4
             king_side = selected.end[1] > king_start_col
             rook_start = self.standard_start_col + (7 if king_side else 0)
-            rook_end = self.standard_start_col + (6 if king_side else 3)
+            rook_end = self.standard_start_col + (5 if king_side else 3)
             self.board[selected.end[0]][rook_end] = self.board[selected.end[0]][rook_start]
             self.board[selected.end[0]][rook_start] = None
 
@@ -483,9 +508,7 @@ class ChessGame:
         self.board[selected.start[0]][selected.start[1]] = None
         moved_piece = piece
         if selected.promotion is not None:
-            moved_piece = Piece(
-                piece.color, selected.promotion, piece.level, piece.experience
-            )
+            moved_piece = self._new_piece(piece.color, selected.promotion)
         self.board[selected.end[0]][selected.end[1]] = moved_piece
 
         self.en_passant_target = None
@@ -508,6 +531,7 @@ class ChessGame:
             )
         if (
             self.king_only
+            and piece.color == WHITE
             and piece.kind == "K"
             and self.board[selected.end[0]][selected.end[1]] is not None
         ):
@@ -515,8 +539,6 @@ class ChessGame:
             if self.last_loot_value:
                 self.last_loot_color = piece.color
                 self.coins[piece.color] += self.last_loot_value
-                self.loot_rank += 1
-                self._spawn_loot(1)
         self.turn = self._opponent(self.turn)
         return True
 
@@ -536,7 +558,6 @@ class ChessGame:
         self.loot = snapshot.loot.copy()
         self.shop_tiles = snapshot.shop_tiles.copy()
         self.building_tiles = snapshot.building_tiles.copy()
-        self.loot_rank = snapshot.loot_rank
         self.last_loot_value = snapshot.last_loot_value
         self.last_loot_color = snapshot.last_loot_color
         self.team_health = snapshot.team_health.copy()
@@ -557,7 +578,6 @@ class ChessGame:
                 self.loot.copy(),
                 self.shop_tiles.copy(),
                 self.building_tiles.copy(),
-                self.loot_rank,
                 self.last_loot_value,
                 self.last_loot_color,
                 self.team_health.copy(),
@@ -588,13 +608,19 @@ class ChessGame:
             for col in range(self.board_size):
                 piece = self.board[row][col]
                 if piece is not None and piece.color == color and piece.kind == "K":
-                    restored = piece.max_health - (piece.health or 0)
+                    piece_health = max(
+                        1,
+                        round(
+                            piece.max_health * self.piece_health_multiplier
+                        ),
+                    )
+                    restored = piece_health - (piece.health or 0)
                     self.board[row][col] = Piece(
                         piece.color,
                         piece.kind,
                         piece.level,
                         piece.experience,
-                        piece.max_health,
+                        piece_health,
                         piece.upgrades,
                     )
                     self.team_health[color] = min(
@@ -656,9 +682,10 @@ class ChessGame:
         target = self.board[pawn_row][col]
         if target is not None:
             self._damage_piece((pawn_row, col), king.color, target.health or 0)
-        self.board[pawn_row][col] = Piece(king.color, "P")
-        self.team_health_max[king.color] += PIECE_VALUES["P"]
-        self.team_health[king.color] += PIECE_VALUES["P"]
+        pawn = self._new_piece(king.color, "P")
+        self.board[pawn_row][col] = pawn
+        self.team_health_max[king.color] += pawn.health or 0
+        self.team_health[king.color] += pawn.health or 0
 
     def _trigger_mine(self, square: tuple[int, int]) -> None:
         owner = self.mines.pop(square, None)
@@ -692,8 +719,9 @@ class ChessGame:
             0, self.team_health[target.color] - (target.health or 0)
         )
         if attacker != target.color:
-            self.coins[attacker] += target.value
             self.captured[attacker].append(target)
+            if attacker == WHITE:
+                self.coins[attacker] += target.value
         return True
 
     def _pseudo_moves_from(self, square: tuple[int, int]) -> list[Move]:

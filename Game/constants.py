@@ -18,6 +18,8 @@ RANDOM_EXTRA_PIECES_PER_SIDE = 20
 
 WHITE = "white"
 BLACK = "black"
+FARM_INCOME_PER_SECOND = 3.0
+LOOT_FARM_SECONDS = 20
 PROMOTION_PIECES = ("Q", "R", "B", "N")
 
 PIECE_VALUES = {
@@ -25,17 +27,27 @@ PIECE_VALUES = {
     "N": 150,
     "B": 150,
     "R": 250,
-    "Q": 450,
+    "Q": 300,
     "K": 600,
 }
 
-PURCHASE_COSTS = {kind: value * 2 for kind, value in PIECE_VALUES.items() if kind != "K"}
-UPGRADE_COSTS = {
+PURCHASE_COST_MULTIPLIER = 20
+UPGRADE_COST_MULTIPLIER = 100
+PURCHASE_COSTS = {
+    kind: value * 2 * PURCHASE_COST_MULTIPLIER
+    for kind, value in PIECE_VALUES.items()
+    if kind != "K"
+}
+BASE_UPGRADE_COSTS = {
     "N": 200,
     "B": 200,
     "R": 250,
     "Q": 400,
     "K": 150,
+}
+UPGRADE_COSTS = {
+    kind: cost * UPGRADE_COST_MULTIPLIER
+    for kind, cost in BASE_UPGRADE_COSTS.items()
 }
 
 UPGRADE_NAMES = {
@@ -54,7 +66,7 @@ class BotDifficulty(TypedDict):
 BOT_DIFFICULTIES: dict[str, BotDifficulty] = {
     "easy": {"label": "Lehky ~100", "depth": 1},
     "medium": {"label": "Stredni ~200", "depth": 4},
-    "hard": {"label": "Tezky ~400 Elo", "depth": 5},
+    "hard": {"label": "Tezky+", "depth": 6},
 }
 
 TEAM_MAX_HEALTH = 4100

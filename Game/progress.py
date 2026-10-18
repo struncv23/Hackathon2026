@@ -31,6 +31,18 @@ def load_campaign() -> Campaign:
     return Campaign.from_dict(data.get("campaign"))
 
 
+def load_tutorials_enabled() -> bool:
+    if not PROGRESS_FILE.exists():
+        return True
+    return bool(_read_progress().get("tutorials_enabled", True))
+
+
+def load_hardcore_enabled() -> bool:
+    if not PROGRESS_FILE.exists():
+        return False
+    return bool(_read_progress().get("hardcore_enabled", False))
+
+
 def _read_progress() -> dict[str, object]:
     try:
         data = json.loads(PROGRESS_FILE.read_text(encoding="utf-8"))
@@ -51,6 +63,35 @@ def save_unlocked_level(level: int) -> None:
 def save_campaign(campaign: Campaign) -> None:
     data = _read_progress() if PROGRESS_FILE.exists() else {}
     data["campaign"] = campaign.to_dict()
+    _write_progress(data)
+
+
+def save_tutorials_enabled(enabled: bool) -> None:
+    data = _read_progress() if PROGRESS_FILE.exists() else {}
+    data["tutorials_enabled"] = enabled
+    _write_progress(data)
+
+
+def save_hardcore_enabled(enabled: bool) -> None:
+    data = _read_progress() if PROGRESS_FILE.exists() else {}
+    data["hardcore_enabled"] = enabled
+    _write_progress(data)
+
+
+def load_language() -> str:
+    if not PROGRESS_FILE.exists():
+        return "cs"
+    language = _read_progress().get("language", "cs")
+    if language not in ("cs", "en"):
+        raise ValueError(f"Invalid game language in {PROGRESS_FILE}")
+    return language
+
+
+def save_language(language: str) -> None:
+    if language not in ("cs", "en"):
+        raise ValueError(f"Unsupported game language: {language}")
+    data = _read_progress() if PROGRESS_FILE.exists() else {}
+    data["language"] = language
     _write_progress(data)
 
 

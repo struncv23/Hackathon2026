@@ -11,6 +11,8 @@ env/
 !.env.example
 
 .vscode/
+!.vscode/
+!.vscode/settings.json
 .idea/
 
 build/
