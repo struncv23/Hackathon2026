@@ -293,6 +293,36 @@ class ChessApp:
             self.game.board_size,
             blocked_raider_squares,
         )
+        king_square = self._king_square(WHITE)
+        if self.campaign.raiders and king_square is not None:
+            health_before = self.game.team_health[WHITE]
+            raider_damage = self.campaign.move_raiders(
+                elapsed_seconds,
+                king_square,
+                blocked_raider_squares,
+                self.game.board_size,
+            )
+            if raider_damage:
+                health_after = max(0, health_before - raider_damage)
+                self.game.team_health[WHITE] = health_after
+                now = pygame.time.get_ticks() / 1000
+                self.team_health_animations[WHITE] = (
+                    health_before,
+                    health_after,
+                    now,
+                )
+                self.damage_popups.append(
+                    (king_square, health_before - health_after, now)
+                )
+                if health_after == 0:
+                    self.campaign.king_dead = True
+                    self.campaign.king_death_reason = (
+                        "Kral padl pod utoky zombiku."
+                    )
+                    self.screen = "death"
+                    self._clear_selection()
+                    self._cancel_bot_turn()
+                self._mark_campaign_dirty()
         changed = elapsed_seconds > 0
         earned = self.campaign.accrue_income(elapsed_seconds)
         if (
@@ -303,8 +333,8 @@ class ChessApp:
             self._ensure_campaign_potions()
             self._show_tutorial(
                 "campaign.zombies",
-                "Pesaci zustanou stat na miste. Poraz je kralem a za jednu "
-                "sekundu se vrati jeden pesec na nahodne volne policko.",
+                "Pesaci-zombici jdou po kralovi a utoci na nej. Poraz je "
+                "kralem; za jednu sekundu se vrati jeden pesec.",
             )
             self._show_tutorial(
                 "campaign.potions",

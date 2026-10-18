@@ -391,8 +391,6 @@ class Campaign:
     ) -> dict[tuple[int, int], int]:
         from collections import deque
 
-        if king_square in blocked:
-            return {}
         distances = {king_square: 0}
         queue = deque([king_square])
         while queue:
@@ -406,7 +404,7 @@ class Campaign:
                 if (
                     0 <= neighbor[0] < board_size
                     and 0 <= neighbor[1] < board_size
-                    and neighbor not in blocked
+                    and (neighbor == king_square or neighbor not in blocked)
                     and neighbor not in distances
                 ):
                     distances[neighbor] = distances[(row, col)] + 1

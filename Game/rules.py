@@ -9,6 +9,7 @@ from .constants import (
     FARM_INCOME_PER_SECOND,
     LOOT_FARM_SECONDS,
     PURCHASE_COSTS,
+    PROMOTION_PIECES,
     RANDOM_EXTRA_PIECES_PER_SIDE,
     PIECE_VALUES,
     UPGRADE_COSTS,
@@ -794,7 +795,13 @@ class ChessGame:
         end: tuple[int, int],
         piece: Piece,
     ) -> list[Move]:
-        return [Move(start, end)]
+        last_row = 0 if piece.color == WHITE else self.board_size - 1
+        if end[0] != last_row:
+            return [Move(start, end)]
+        return [
+            Move(start, end, promotion=kind)
+            for kind in PROMOTION_PIECES
+        ]
 
     def _step_moves(
         self,
