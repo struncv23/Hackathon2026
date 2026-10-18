@@ -7,6 +7,13 @@ import random
 from .constants import BLACK, FARM_INCOME_PER_SECOND, WHITE
 
 ARMY_KINDS = ("P", "N", "B", "R", "Q")
+ACHIEVEMENT_IDS = (
+    "baller",
+    "businessman",
+    "zabijak",
+    "alchemist",
+    "hot_destinations",
+)
 FARM_LIMIT = 12
 FARM_BASE_COST = 250
 FARM_COST_STEP = 400
@@ -82,6 +89,10 @@ class Campaign:
     raiders: list[Raider] = field(default_factory=list)
     raider_respawns: list[float] = field(default_factory=list)
     potions: list[tuple[int, int]] = field(default_factory=list)
+    raiders_defeated_total: int = 0
+    king_potion_heals: int = 0
+    unlocked_achievements: list[str] = field(default_factory=list)
+    visited_campaign_squares: list[tuple[int, int]] = field(default_factory=list)
 
     def faction(self, color: str) -> Faction:
         return self.player if color == WHITE else self.rival
@@ -558,6 +569,18 @@ class Campaign:
                     data.get("raider_respawns")
                 ),
                 potions=cls._read_potions(data.get("potions")),
+                raiders_defeated_total=cls._read_nonnegative_int(
+                    data.get("raiders_defeated_total", 0)
+                ),
+                king_potion_heals=cls._read_nonnegative_int(
+                    data.get("king_potion_heals", 0)
+                ),
+                unlocked_achievements=cls._read_achievement_ids(
+                    data.get("unlocked_achievements")
+                ),
+                visited_campaign_squares=cls._read_campaign_squares(
+                    data.get("visited_campaign_squares")
+                ),
             )
         except (TypeError, ValueError):
             return cls()
@@ -644,6 +667,44 @@ class Campaign:
             if len(potions) == POTION_LIMIT:
                 break
         return potions
+
+    @staticmethod
+    def _read_nonnegative_int(value: object) -> int:
+        try:
+            return max(0, int(value))
+        except (TypeError, ValueError, OverflowError):
+            return 0
+
+    @staticmethod
+    def _read_achievement_ids(value: object) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        return list(
+            dict.fromkeys(
+                achievement_id
+                for achievement_id in value
+                if isinstance(achievement_id, str)
+                and achievement_id in ACHIEVEMENT_IDS
+            )
+        )
+
+    @staticmethod
+    def _read_campaign_squares(value: object) -> list[tuple[int, int]]:
+        if not isinstance(value, list):
+            return []
+        squares: list[tuple[int, int]] = []
+        for square in value:
+            if (
+                isinstance(square, (list, tuple))
+                and len(square) == 2
+                and all(isinstance(part, int) for part in square)
+                and 0 <= square[0] < 20
+                and 0 <= square[1] < 20
+            ):
+                position = (square[0], square[1])
+                if position not in squares:
+                    squares.append(position)
+        return squares
 
     @staticmethod
     def _faction_from_dict(data: object) -> Faction:

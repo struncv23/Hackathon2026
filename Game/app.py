@@ -67,6 +67,19 @@ CAMPAIGN_INTRO_ZOOM_DURATION_MS = 4500
 CAMPAIGN_INTRO_START_ZOOM = 2.0
 CAMERA_FOLLOW_SPEED = 14.0
 WAR_VICTORY_SURRENDER_DURATION_MS = 4200
+ACHIEVEMENT_REWARD = 5_000
+ACHIEVEMENT_NOTIFICATION_DURATION_MS = 6500
+ACHIEVEMENTS = (
+    ("baller", "Baller", "Ziskej 12 dam v armade."),
+    ("businessman", "Businessman", "Postav vsech 12 farem."),
+    ("zabijak", "Zabijak", "Poraz 10 nepratelskych pesaku."),
+    ("alchemist", "Alchymista", "Vylec krale 10 lektvary."),
+    (
+        "hot_destinations",
+        "Horké destinace",
+        "Navstiv vsechna dostupna policka kampane.",
+    ),
+)
 
 
 class ChessApp:
@@ -145,6 +158,7 @@ class ChessApp:
         self.menu_play_button = pygame.Rect(380, 455, 280, 54)
         self.menu_new_game_button = pygame.Rect(380, 522, 280, 54)
         self.menu_quit_button = pygame.Rect(380, 589, 280, 54)
+        self.achievements_back_button = pygame.Rect(370, 680, 300, 48)
         self.debug_menu_button = pygame.Rect(790, 164, 210, 40)
         self.debug_add_gold_button = pygame.Rect(370, 420, 300, 56)
         self.debug_add_random_gold_button = pygame.Rect(370, 492, 300, 56)
@@ -173,10 +187,13 @@ class ChessApp:
         self.damage_popups: list[tuple[tuple[int, int], int, float]] = []
         self.campaign_tab = "farms"
         self.kingdom_game: ChessGame | None = None
+        self._campaign_navigation_game: ChessGame | None = None
         self.campaign_battle_active = False
         self.boss_deployment_active = False
         self.boss_battle_active = False
         self.war_victory_started_at: int | None = None
+        self.achievement_return_screen = "menu"
+        self.achievement_notifications: list[tuple[str, int]] = []
         self.campaign_intro_zoom_started_at: int | None = None
         self.banter_started_at = pygame.time.get_ticks()
         self.boss_deployment: dict[str, int] = {
@@ -259,9 +276,11 @@ class ChessApp:
                 elapsed_seconds = self.clock.tick(120) / 1000
                 self._handle_events()
                 self._update_bot_turn()
+                self._check_achievements()
                 self._advance_campaign_intro_zoom()
                 self._update_camera_follow(elapsed_seconds)
                 self._draw()
+                self._draw_achievement_notifications()
                 pygame.display.flip()
                 self._advance_realtime_campaign(elapsed_seconds)
                 self._flush_campaign_save()
@@ -576,6 +595,7 @@ class ChessApp:
         if new_health == old_health:
             return 0
         self.campaign.potions.remove(square)
+        self.campaign.king_potion_heals += 1
         self.game.board[square[0]][square[1]] = Piece(
             king.color,
             king.kind,
@@ -681,6 +701,14 @@ class ChessApp:
             if key in (pygame.K_ESCAPE, pygame.K_RETURN, pygame.K_SPACE):
                 self.screen = "menu"
             return
+        if self.screen == "achievements":
+            if key in (pygame.K_l, pygame.K_ESCAPE):
+                self.screen = self.achievement_return_screen
+            return
+        if key == pygame.K_l and self.screen in ("game", "menu", "debug"):
+            self.achievement_return_screen = self.screen
+            self.screen = "achievements"
+            return
 
         if self.screen == "death":
             if key in (pygame.K_RETURN, pygame.K_SPACE):
@@ -690,8 +718,6 @@ class ChessApp:
                     self._retry_after_death()
             elif key == pygame.K_ESCAPE:
                 self.screen = "menu"
-            return
-        if self.screen == "war_victory":
             return
 
         if self.screen == "menu":
@@ -787,6 +813,12 @@ class ChessApp:
                 self._retry_after_death()
             elif self.death_menu_button.collidepoint(position):
                 self.screen = "menu"
+            return
+        if self.screen == "achievements":
+            if self.achievements_back_button.collidepoint(position):
+                self.screen = self.achievement_return_screen
+            return
+        if self.screen == "war_victory":
             return
         if (
             self.tutorial_active is not None
@@ -1183,8 +1215,20 @@ class ChessApp:
         self.active_level = self.selected_level
         self.campaign_intro_zoom_started_at = None
         if self.active_level == 2 and reset_campaign:
-            self.campaign = Campaign()
+            previous_campaign = self.campaign
+            self.campaign = Campaign(
+                raiders_defeated_total=previous_campaign.raiders_defeated_total,
+                king_potion_heals=previous_campaign.king_potion_heals,
+                unlocked_achievements=list(
+                    previous_campaign.unlocked_achievements
+                ),
+                visited_campaign_squares=list(
+                    previous_campaign.visited_campaign_squares
+                ),
+            )
         self.game = self._create_level_game(self.active_level)
+        if self.active_level == 2:
+            self._record_campaign_square(self._king_square(WHITE))
         if self.active_level == 2:
             changed = self._ensure_boss_chest_position()
             changed = self._ensure_campaign_potions() or changed
@@ -1262,6 +1306,13 @@ class ChessApp:
         raiders_defeated = 0
         if self.game.play(move):
             if (
+                realtime_campaign
+                and moving_piece is not None
+                and moving_piece.color == WHITE
+                and moving_piece.kind == "K"
+            ):
+                self._record_campaign_square(move.end)
+            if (
                 self.active_level == 1
                 and moving_piece is not None
                 and moving_piece.color == WHITE
@@ -1288,6 +1339,7 @@ class ChessApp:
                     move.end, self.campaign.realtime_seconds
                 )
                 if raiders_defeated:
+                    self.campaign.raiders_defeated_total += raiders_defeated
                     self._mark_campaign_dirty()
                 potion_heal = self._collect_campaign_potion(move.end)
                 if self.campaign.boss_chest_position is not None:
@@ -2531,6 +2583,180 @@ class ChessApp:
         self.legal_moves = []
         self.pending_promotion = []
 
+    def _achievement_progress(self) -> dict[str, tuple[int, int]]:
+        accessible_squares = self._accessible_campaign_squares()
+        visited_squares = set(self.campaign.visited_campaign_squares)
+        return {
+            "baller": (
+                min(12, self.campaign.player.army["Q"]),
+                12,
+            ),
+            "businessman": (
+                min(FARM_LIMIT, self.campaign.player.farms),
+                FARM_LIMIT,
+            ),
+            "zabijak": (
+                min(10, self.campaign.raiders_defeated_total),
+                10,
+            ),
+            "alchemist": (
+                min(10, self.campaign.king_potion_heals),
+                10,
+            ),
+            "hot_destinations": (
+                len(visited_squares & accessible_squares),
+                len(accessible_squares),
+            ),
+        }
+
+    def _campaign_navigation_board(self) -> ChessGame:
+        if self.game.campaign_map:
+            return self.game
+        if self.kingdom_game is not None:
+            return self.kingdom_game
+        if self._campaign_navigation_game is None:
+            self._campaign_navigation_game = self._create_level_game(2)
+        return self._campaign_navigation_game
+
+    def _accessible_campaign_squares(self) -> set[tuple[int, int]]:
+        board = self._campaign_navigation_board()
+        inaccessible = set(board.building_tiles)
+        inaccessible.update(
+            square
+            for square in board.shop_tiles
+            if square[0] < board.board_size // 2
+        )
+        return {
+            (row, col)
+            for row in range(board.board_size)
+            for col in range(board.board_size)
+            if (row, col) not in inaccessible
+        }
+
+    def _record_campaign_square(
+        self, square: tuple[int, int] | None
+    ) -> None:
+        if (
+            square is not None
+            and square in self._accessible_campaign_squares()
+            and square not in self.campaign.visited_campaign_squares
+        ):
+            self.campaign.visited_campaign_squares.append(square)
+            self._mark_campaign_dirty()
+
+    def _check_achievements(self) -> None:
+        progress = self._achievement_progress()
+        now = pygame.time.get_ticks()
+        for achievement_id, _, _ in ACHIEVEMENTS:
+            current, target = progress[achievement_id]
+            if (
+                current < target
+                or achievement_id in self.campaign.unlocked_achievements
+            ):
+                continue
+            self.campaign.unlocked_achievements.append(achievement_id)
+            self.campaign.player.coins += ACHIEVEMENT_REWARD
+            self.achievement_notifications.append((achievement_id, now))
+            self._mark_campaign_dirty()
+
+    def _draw_achievements(self) -> None:
+        self.surface.fill((24, 31, 29))
+        self._center_text(
+            "ACHIEVEMENTS",
+            self.title_font,
+            (255, 232, 177),
+            (520, 78),
+        )
+        self._center_text(
+            "Stiskni L nebo ESC pro navrat",
+            self.small_font,
+            (190, 199, 188),
+            (520, 125),
+        )
+
+        progress = self._achievement_progress()
+        unlocked = set(self.campaign.unlocked_achievements)
+        for index, (achievement_id, name, description) in enumerate(ACHIEVEMENTS):
+            card = pygame.Rect(130, 154 + index * 104, 780, 88)
+            complete = achievement_id in unlocked
+            pygame.draw.rect(
+                self.surface,
+                (55, 75, 61) if complete else (39, 48, 44),
+                card,
+                border_radius=10,
+            )
+            pygame.draw.rect(
+                self.surface,
+                (214, 177, 104) if complete else (82, 94, 85),
+                card,
+                width=2,
+                border_radius=10,
+            )
+            current, target = progress[achievement_id]
+            self._text(
+                name,
+                self.font,
+                (255, 224, 143) if complete else (232, 235, 224),
+                (card.x + 18, card.y + 9),
+            )
+            self._text(
+                description,
+                self.small_font,
+                (218, 223, 212),
+                (card.x + 210, card.y + 12),
+            )
+            self._text(
+                f"Postup: {current}/{target}",
+                self.small_font,
+                (168, 214, 170) if complete else (190, 199, 188),
+                (card.x + 18, card.y + 54),
+            )
+            self._text(
+                "Splneno! +5000 zlata" if complete else "Odměna: 5000 zlata",
+                self.small_font,
+                (255, 224, 143) if complete else (190, 199, 188),
+                (card.x + 390, card.y + 54),
+            )
+
+        self._draw_menu_button(self.achievements_back_button, "Zpet")
+
+    def _draw_achievement_notifications(self) -> None:
+        now = pygame.time.get_ticks()
+        self.achievement_notifications = [
+            (achievement_id, started_at)
+            for achievement_id, started_at in self.achievement_notifications
+            if now - started_at < ACHIEVEMENT_NOTIFICATION_DURATION_MS
+        ]
+        for index, (achievement_id, _) in enumerate(
+            self.achievement_notifications[-len(ACHIEVEMENTS):]
+        ):
+            rect = pygame.Rect(690, 18 + index * 72, 330, 62)
+            pygame.draw.rect(self.surface, (38, 55, 43), rect, border_radius=8)
+            pygame.draw.rect(
+                self.surface,
+                (224, 190, 119),
+                rect,
+                width=2,
+                border_radius=8,
+            )
+            name = next(
+                name
+                for item_id, name, _ in ACHIEVEMENTS
+                if item_id == achievement_id
+            )
+            self._text(
+                f"Achievement: {name}",
+                self.small_font,
+                (255, 232, 177),
+                (rect.x + 12, rect.y + 7),
+            )
+            self._text(
+                "+5000 zlata",
+                self.small_font,
+                (220, 235, 214),
+                (rect.x + 12, rect.y + 34),
+            )
+
     def _draw(self) -> None:
         now = pygame.time.get_ticks() / 1000
         self.piece_health_animations = {
@@ -2552,6 +2778,9 @@ class ChessApp:
             return
         if self.screen == "debug":
             self._draw_debug_menu()
+            return
+        if self.screen == "achievements":
+            self._draw_achievements()
             return
         if self.screen == "death":
             self._draw_death_screen()
