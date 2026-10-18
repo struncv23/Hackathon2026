@@ -20,9 +20,10 @@ Zavislosti jsou uvedene v `requirements.txt`.
 - `campaign.py` — ekonomika, mesta, farmy, armady a ulozeni kralovstvi.
 
 Po spusteni se zobrazi hlavni menu. Z nej lze spustit/pokracovat ve hre,
-zacit novou hru nebo aplikaci ukoncit. Behem partie vede tlacitko **Menu**
-nebo klavesa **Esc** zpet do menu; pokud je vybrana figurka, prvni Esc vyber
-jen zrusi.
+zacit novou hru nebo aplikaci ukoncit. Behem partie otevre tlacitko **Pauza**
+nebo klavesa **Esc** pauzu; pokud je vybrana figurka, prvni Esc vyber jen
+zrusi. V pauze lze pokracovat, vratit se do hlavniho menu a nastavit hlasitost
+hudby na pozadi i zvuku menu; obe hlasitosti se ulozi pro dalsi spusteni.
 
 ## Kampan
 

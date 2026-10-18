@@ -93,6 +93,8 @@ class ChessApp:
         self.windowed_size = WINDOW_SIZE
         self.fullscreen = False
         self.surface = pygame.display.set_mode(WINDOW_SIZE)
+        self.pause_shade_surface = pygame.Surface(WINDOW_SIZE, pygame.SRCALPHA)
+        self.pause_shade_surface.fill((8, 12, 10, 205))
         desktop_sizes = pygame.display.get_desktop_sizes()
         if desktop_sizes:
             desktop_width, desktop_height = desktop_sizes[0]
@@ -1026,6 +1028,11 @@ class ChessApp:
             self._handle_shop_screen_click(position)
             return
 
+        if self.active_level == 2 and self.in_game_menu_button.collidepoint(position):
+            self._play_menu_sfx()
+            self._clear_selection()
+            self.screen = "pause"
+            return
         if self.active_level == 2:
             self._handle_campaign_board_click(position)
             return
@@ -3014,10 +3021,14 @@ class ChessApp:
             self._draw_campaign_hud()
         else:
             self._draw_sidebar()
-        self._draw_tutorial()
+        if self.screen != "pause":
+            self._draw_tutorial()
         if self.pending_promotion:
             self._draw_promotion_prompt()
-        self._draw_king_banter()
+        if self.screen == "pause":
+            self._draw_pause_menu()
+        else:
+            self._draw_king_banter()
 
     def _draw_boss_deployment(self) -> None:
         self.surface.fill((24, 31, 29))
@@ -3639,6 +3650,56 @@ class ChessApp:
                 (520, 692),
             )
 
+    def _draw_pause_menu(self) -> None:
+        self.surface.blit(self.pause_shade_surface, (0, 0))
+        panel = pygame.Rect(270, 190, 500, 440)
+        pygame.draw.rect(self.surface, (28, 36, 34), panel, border_radius=16)
+        pygame.draw.rect(
+            self.surface, (205, 169, 99), panel, width=2, border_radius=16
+        )
+        self._center_text("Pauza", self.title_font, (255, 232, 177), (520, 245))
+        self._center_text(
+            "Hudba na pozadí",
+            self.small_font,
+            (245, 242, 226),
+            (520, 314),
+        )
+        self._draw_audio_slider(self.pause_music_slider, self.music_volume)
+        self._center_text(
+            f"{round(self.music_volume * 100)} %",
+            self.small_font,
+            (220, 225, 214),
+            (690, self.pause_music_slider.centery),
+        )
+        self._center_text(
+            "Zvuky menu",
+            self.small_font,
+            (245, 242, 226),
+            (520, 402),
+        )
+        self._draw_audio_slider(self.pause_sfx_slider, self.sfx_volume)
+        self._center_text(
+            f"{round(self.sfx_volume * 100)} %",
+            self.small_font,
+            (220, 225, 214),
+            (690, self.pause_sfx_slider.centery),
+        )
+        self._draw_menu_button(self.pause_resume_button, "Pokračovat")
+        self._draw_menu_button(self.pause_menu_button, "Hlavní menu")
+
+    def _draw_audio_slider(self, rect: pygame.Rect, volume: float) -> None:
+        pygame.draw.rect(self.surface, (63, 75, 68), rect, border_radius=6)
+        filled = rect.copy()
+        filled.width = round(rect.width * volume)
+        if filled.width:
+            pygame.draw.rect(self.surface, (205, 169, 99), filled, border_radius=6)
+        pygame.draw.circle(
+            self.surface,
+            (255, 232, 177),
+            (rect.left + round(rect.width * volume), rect.centery),
+            10,
+        )
+
     def _draw_debug_menu(self) -> None:
         self.surface.fill((28, 36, 34))
         self._center_text(
@@ -3753,7 +3814,7 @@ class ChessApp:
                 enabled=bool(self.game.history) and not self.hardcore_enabled,
             )
         self._draw_button(self.reset_button, "Nova hra")
-        self._draw_button(self.in_game_menu_button, "Menu")
+        self._draw_button(self.in_game_menu_button, "Pauza")
 
     def _draw_campaign_sidebar(self) -> None:
         if self.campaign_battle_active:
@@ -3889,7 +3950,7 @@ class ChessApp:
             ),
         )
         self._draw_button(self.reset_button, "Nova hra")
-        self._draw_button(self.in_game_menu_button, "Menu")
+        self._draw_button(self.in_game_menu_button, "Pauza")
 
     def _draw_battle_sidebar(self) -> None:
         left = 720
@@ -3917,7 +3978,7 @@ class ChessApp:
             enabled=bool(self.game.history) and not self.hardcore_enabled,
         )
         self._draw_button(self.reset_button, "Nova hra")
-        self._draw_button(self.in_game_menu_button, "Menu")
+        self._draw_button(self.in_game_menu_button, "Pauza")
 
     def _draw_team_health(self, color: str, y: int) -> None:
         label = (
