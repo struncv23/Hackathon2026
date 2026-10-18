@@ -66,6 +66,7 @@ from .textures import SceneTextures
 CAMPAIGN_INTRO_ZOOM_DURATION_MS = 4500
 CAMPAIGN_INTRO_START_ZOOM = 2.0
 CAMERA_FOLLOW_SPEED = 14.0
+WAR_VICTORY_SURRENDER_DURATION_MS = 4200
 
 
 class ChessApp:
@@ -146,7 +147,8 @@ class ChessApp:
         self.menu_quit_button = pygame.Rect(380, 589, 280, 54)
         self.debug_menu_button = pygame.Rect(790, 164, 210, 40)
         self.debug_add_gold_button = pygame.Rect(370, 420, 300, 56)
-        self.debug_back_button = pygame.Rect(370, 492, 300, 56)
+        self.debug_add_random_gold_button = pygame.Rect(370, 492, 300, 56)
+        self.debug_back_button = pygame.Rect(370, 564, 300, 56)
         self.tutorial_toggle_button = pygame.Rect(790, 20, 210, 40)
         self.language_toggle_button = pygame.Rect(790, 68, 210, 40)
         self.hardcore_toggle_button = pygame.Rect(790, 116, 210, 40)
@@ -174,6 +176,7 @@ class ChessApp:
         self.campaign_battle_active = False
         self.boss_deployment_active = False
         self.boss_battle_active = False
+        self.war_victory_started_at: int | None = None
         self.campaign_intro_zoom_started_at: int | None = None
         self.banter_started_at = pygame.time.get_ticks()
         self.boss_deployment: dict[str, int] = {
@@ -274,6 +277,7 @@ class ChessApp:
             self.active_level != 2
             or self.campaign_battle_active
             or self.campaign.king_dead
+            or self.screen == "war_victory"
         ):
             return
 
@@ -673,6 +677,11 @@ class ChessApp:
                 self._cancel_boss_deployment()
             return
 
+        if self.screen == "war_victory":
+            if key in (pygame.K_ESCAPE, pygame.K_RETURN, pygame.K_SPACE):
+                self.screen = "menu"
+            return
+
         if self.screen == "death":
             if key in (pygame.K_RETURN, pygame.K_SPACE):
                 if self.hardcore_enabled:
@@ -681,6 +690,8 @@ class ChessApp:
                     self._retry_after_death()
             elif key == pygame.K_ESCAPE:
                 self.screen = "menu"
+            return
+        if self.screen == "war_victory":
             return
 
         if self.screen == "menu":
@@ -830,6 +841,10 @@ class ChessApp:
         if self.screen == "debug":
             if self.debug_add_gold_button.collidepoint(position):
                 self.campaign.player.coins += 10_000
+                self._mark_campaign_dirty()
+                self._flush_campaign_save(force=True)
+            elif self.debug_add_random_gold_button.collidepoint(position):
+                self.campaign.player.coins += random.randint(1, 1_000_000)
                 self._mark_campaign_dirty()
                 self._flush_campaign_save(force=True)
             elif self.debug_back_button.collidepoint(position):
@@ -1178,6 +1193,7 @@ class ChessApp:
                 self._flush_campaign_save(force=True)
         self.campaign_battle_active = False
         self.boss_battle_active = False
+        self.war_victory_started_at = None
         self.boss_deployment_active = False
         self.boss_deployment = {kind: 0 for kind in ARMY_KINDS}
         self.boss_deployed_army = {}
@@ -1589,6 +1605,9 @@ class ChessApp:
         self.game.turn = WHITE
         self._clear_selection()
         self.status = battle_result
+        if winner == WHITE:
+            self.screen = "war_victory"
+            self.war_victory_started_at = pygame.time.get_ticks()
         self._flush_campaign_save(force=True)
 
     def _resolve_boss_battle(self) -> None:
@@ -2538,6 +2557,9 @@ class ChessApp:
             self._draw_death_screen()
             self._draw_king_banter()
             return
+        if self.screen == "war_victory":
+            self._draw_war_victory(now)
+            return
 
         if self.boss_deployment_active:
             self._draw_boss_deployment()
@@ -2746,6 +2768,114 @@ class ChessApp:
             self._draw_menu_button(self.death_retry_button, "Zkusit znovu")
             self.death_menu_button.y = 546
         self._draw_menu_button(self.death_menu_button, "Hlavni menu")
+
+    def _draw_war_victory(self, now: float) -> None:
+        started_at = self.war_victory_started_at
+        elapsed_ms = (
+            0 if started_at is None else pygame.time.get_ticks() - started_at
+        )
+        width, height = self.surface.get_size()
+        self.surface.fill((18, 27, 29))
+        pygame.draw.rect(
+            self.surface,
+            (27, 43, 43),
+            pygame.Rect(0, height // 2, width, height // 2),
+        )
+        pygame.draw.line(
+            self.surface,
+            (140, 116, 75),
+            (0, height - 112),
+            (width, height - 112),
+            3,
+        )
+
+        if elapsed_ms < WAR_VICTORY_SURRENDER_DURATION_MS:
+            progress = min(
+                1.0,
+                elapsed_ms / WAR_VICTORY_SURRENDER_DURATION_MS,
+            )
+            pole_x = width // 2 + 60
+            pole_top = round(height * (0.49 - 0.12 * progress))
+            pole_bottom = height - 112
+            pygame.draw.line(
+                self.surface,
+                (180, 155, 103),
+                (pole_x, pole_top),
+                (pole_x, pole_bottom),
+                8,
+            )
+            wave = round(math.sin(now * 5) * 9)
+            flag_points = [
+                (pole_x + 4, pole_top + 8),
+                (pole_x + 112, pole_top + 18 + wave),
+                (pole_x + 96, pole_top + 68 + wave),
+                (pole_x + 4, pole_top + 58),
+            ]
+            pygame.draw.polygon(self.surface, (244, 242, 224), flag_points)
+            pygame.draw.polygon(
+                self.surface,
+                (201, 190, 157),
+                flag_points,
+                width=3,
+            )
+
+            king_size = round(160 + 10 * progress)
+            king_surface = pygame.Surface(
+                (king_size, king_size),
+                pygame.SRCALPHA,
+            )
+            self.renderer.draw_piece_sprite(
+                king_surface,
+                pygame.Rect(8, 8, king_size - 16, king_size - 16),
+                "K",
+                BLACK,
+            )
+            bowed_king = pygame.transform.rotozoom(
+                king_surface,
+                -8 * progress,
+                1,
+            )
+            self.surface.blit(
+                bowed_king,
+                bowed_king.get_rect(
+                    midbottom=(width // 2 - 75, height - 112)
+                ),
+            )
+            self._center_text(
+                "Černý král se vzdává",
+                self.title_font,
+                (245, 232, 196),
+                (width // 2, 112),
+            )
+            return
+
+        pygame.draw.rect(
+            self.surface,
+            (204, 171, 103),
+            pygame.Rect(48, 48, width - 96, height - 96),
+            width=3,
+            border_radius=18,
+        )
+        victory_font = pygame.font.SysFont("consolas", 76, bold=True)
+        ending_font = pygame.font.SysFont("consolas", 58, bold=True)
+        self._center_text(
+            "VYHRÁLI JSTE",
+            victory_font,
+            (255, 229, 158),
+            (width // 2, height // 2 - 48),
+        )
+        self._center_text(
+            "KONEC",
+            ending_font,
+            (245, 242, 226),
+            (width // 2, height // 2 + 48),
+        )
+        self._center_text(
+            "Stiskni ESC pro hlavní menu",
+            self.small_font,
+            (181, 192, 181),
+            (width // 2, height - 88),
+        )
 
     def _show_tutorial(self, key: str, message: str) -> None:
         if not self.tutorial_enabled or key in self.tutorial_seen:
@@ -2982,7 +3112,7 @@ class ChessApp:
             (520, 210),
         )
         self._center_text(
-            "Obtížnost bota (orientační chess.com Elo)",
+            "Obtížnost bota (ELO)",
             subtitle,
             (245, 242, 226),
             (520, 253),
@@ -3145,6 +3275,10 @@ class ChessApp:
         self._draw_menu_button(
             self.debug_add_gold_button,
             "Pridat 10000 zlata",
+        )
+        self._draw_menu_button(
+            self.debug_add_random_gold_button,
+            "Pridat nahodne zlato (1-1000000)",
         )
         self._draw_menu_button(self.debug_back_button, "Zpet")
 

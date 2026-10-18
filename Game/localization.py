@@ -228,6 +228,7 @@ ENGLISH: dict[str, str] = {
     "Vstoupil jsi do:": "Entered:",
     "Debug": "Debug",
     "Pridat 10000 zlata": "Add 10000 gold",
+    "Pridat nahodne zlato (1-1000000)": "Add random gold (1-1,000,000)",
     "Zpet": "Back",
     "Zlato v kralovstvi:": "Kingdom gold:",
     "Farmarsky sektor a prvni farma postaveny.": "Farm sector and first farm built.",
