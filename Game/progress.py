@@ -18,7 +18,7 @@ def load_unlocked_level() -> int:
         return 1
 
     data = _read_progress()
-    level = data.get("unlocked_level")
+    level = data.get("unlocked_level", 1)
     if level not in (1, 2):
         raise ValueError(f"Invalid unlocked level in {PROGRESS_FILE}")
     return level

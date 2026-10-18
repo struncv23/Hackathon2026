@@ -144,6 +144,9 @@ class ChessApp:
         self.menu_play_button = pygame.Rect(380, 455, 280, 54)
         self.menu_new_game_button = pygame.Rect(380, 522, 280, 54)
         self.menu_quit_button = pygame.Rect(380, 589, 280, 54)
+        self.debug_menu_button = pygame.Rect(790, 164, 210, 40)
+        self.debug_add_gold_button = pygame.Rect(370, 420, 300, 56)
+        self.debug_back_button = pygame.Rect(370, 492, 300, 56)
         self.tutorial_toggle_button = pygame.Rect(790, 20, 210, 40)
         self.language_toggle_button = pygame.Rect(790, 68, 210, 40)
         self.hardcore_toggle_button = pygame.Rect(790, 116, 210, 40)
@@ -684,6 +687,10 @@ class ChessApp:
             if key in (pygame.K_RETURN, pygame.K_SPACE):
                 self._start_or_continue()
             return
+        if self.screen == "debug":
+            if key == pygame.K_ESCAPE:
+                self.screen = "menu"
+            return
 
         if (
             self.active_level == 2
@@ -805,6 +812,8 @@ class ChessApp:
                 self._toggle_language()
             elif self.hardcore_toggle_button.collidepoint(position):
                 self._toggle_hardcore()
+            elif self.debug_menu_button.collidepoint(position):
+                self.screen = "debug"
             elif self.menu_play_button.collidepoint(position):
                 self._start_or_continue()
             elif self.menu_new_game_button.collidepoint(position):
@@ -817,6 +826,14 @@ class ChessApp:
                     self.screen = "game"
             elif self.menu_quit_button.collidepoint(position):
                 self.running = False
+            return
+        if self.screen == "debug":
+            if self.debug_add_gold_button.collidepoint(position):
+                self.campaign.player.coins += 10_000
+                self._mark_campaign_dirty()
+                self._flush_campaign_save(force=True)
+            elif self.debug_back_button.collidepoint(position):
+                self.screen = "menu"
             return
 
         if self.shop_menu is not None and self.active_level == 2 and not self.campaign_battle_active:
@@ -2514,6 +2531,9 @@ class ChessApp:
             self._draw_menu()
             self._draw_tutorial()
             return
+        if self.screen == "debug":
+            self._draw_debug_menu()
+            return
         if self.screen == "death":
             self._draw_death_screen()
             self._draw_king_banter()
@@ -3086,6 +3106,7 @@ class ChessApp:
             (245, 245, 235),
             self.hardcore_toggle_button.center,
         )
+        self._draw_menu_button(self.debug_menu_button, "Debug")
         hint = pygame.font.SysFont("consolas", 16)
         self._center_text(
             "V první části vyhraješ jen zabitím černého krále.",
@@ -3100,6 +3121,32 @@ class ChessApp:
                 (239, 178, 150),
                 (520, 692),
             )
+
+    def _draw_debug_menu(self) -> None:
+        self.surface.fill((28, 36, 34))
+        self._center_text(
+            "DEBUG",
+            self.title_font,
+            (255, 232, 177),
+            (520, 285),
+        )
+        self._center_text(
+            "Zlato v kralovstvi:",
+            self.small_font,
+            (245, 242, 226),
+            (520, 350),
+        )
+        self._center_text(
+            str(self.campaign.player.coins),
+            self.font,
+            (255, 232, 177),
+            (520, 382),
+        )
+        self._draw_menu_button(
+            self.debug_add_gold_button,
+            "Pridat 10000 zlata",
+        )
+        self._draw_menu_button(self.debug_back_button, "Zpet")
 
     def _draw_difficulty_button(
         self, rect: pygame.Rect, label: str, *, selected: bool
