@@ -5,6 +5,7 @@ from copy import deepcopy
 from collections import OrderedDict
 import math
 import random
+from array import array
 
 import pygame
 
@@ -49,11 +50,13 @@ from .models import Move, Piece
 from .renderer import BoardRenderer
 from .progress import (
     load_campaign,
+    load_audio_volumes,
     load_hardcore_enabled,
     load_language,
     load_tutorials_enabled,
     load_unlocked_level,
     save_campaign,
+    save_audio_volumes,
     save_hardcore_enabled,
     save_language,
     save_tutorials_enabled,
@@ -85,6 +88,7 @@ ACHIEVEMENTS = (
 class ChessApp:
     def __init__(self, effects: Effects | None = None) -> None:
         pygame.init()
+        self._initialize_audio()
         pygame.display.set_caption("Šachy — základ")
         self.windowed_size = WINDOW_SIZE
         self.fullscreen = False
@@ -171,6 +175,19 @@ class ChessApp:
         self.undo_button = pygame.Rect(720, 650, 280, 32)
         self.reset_button = pygame.Rect(720, 688, 280, 32)
         self.in_game_menu_button = pygame.Rect(720, 726, 280, 30)
+        self.pause_resume_button = pygame.Rect(380, 500, 280, 52)
+        self.pause_menu_button = pygame.Rect(380, 566, 280, 52)
+        self.pause_music_slider = pygame.Rect(390, 350, 260, 12)
+        self.pause_sfx_slider = pygame.Rect(390, 438, 260, 12)
+        self.pause_slider_drag: str | None = None
+        self.music_volume, self.sfx_volume = load_audio_volumes()
+        self.music_channel = pygame.mixer.Channel(0)
+        self.sfx_channel = pygame.mixer.Channel(1)
+        self.music_sound = self._create_background_music()
+        self.sfx_sound = self._create_menu_sound()
+        self.music_channel.set_volume(self.music_volume)
+        self.music_channel.play(self.music_sound, loops=-1)
+        self.sfx_channel.set_volume(self.sfx_volume)
         self.last_action_was_bot = False
         self.bot_executor = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="chess-bot"
@@ -253,6 +270,69 @@ class ChessApp:
         self.campaign_hud_surface.fill((20, 27, 24, 228))
 
     @staticmethod
+    def _initialize_audio() -> None:
+        if pygame.mixer.get_init() is None:
+            pygame.mixer.init(frequency=22050, size=-16, channels=1)
+        if pygame.mixer.get_init() is None or pygame.mixer.get_init()[1] != -16:
+            raise RuntimeError("The game requires a signed 16-bit audio mixer.")
+
+    @staticmethod
+    def _sound_from_samples(samples: array) -> pygame.mixer.Sound:
+        mixer_settings = pygame.mixer.get_init()
+        if mixer_settings is None:
+            raise RuntimeError("The audio mixer is not initialized.")
+        channels = mixer_settings[2]
+        if channels > 1:
+            multi_channel_samples = array("h")
+            for sample in samples:
+                multi_channel_samples.extend((sample,) * channels)
+            samples = multi_channel_samples
+        return pygame.mixer.Sound(buffer=samples.tobytes())
+
+    @classmethod
+    def _create_background_music(cls) -> pygame.mixer.Sound:
+        mixer_settings = pygame.mixer.get_init()
+        if mixer_settings is None:
+            raise RuntimeError("The audio mixer is not initialized.")
+        sample_rate = mixer_settings[0]
+        duration_seconds = 8
+        melody = (261.63, 329.63, 392.0, 329.63, 293.66, 349.23, 440.0, 349.23)
+        samples = array("h")
+        for sample_index in range(sample_rate * duration_seconds):
+            time_seconds = sample_index / sample_rate
+            beat = int(time_seconds)
+            note_progress = time_seconds - beat
+            envelope = min(1.0, note_progress / 0.06, (1.0 - note_progress) / 0.1)
+            frequency = melody[beat % len(melody)]
+            value = envelope * (
+                0.24 * math.sin(2 * math.pi * frequency * time_seconds)
+                + 0.09 * math.sin(2 * math.pi * frequency * 2 * time_seconds)
+                + 0.12 * math.sin(2 * math.pi * 110 * time_seconds)
+                + 0.08 * math.sin(2 * math.pi * 55 * time_seconds)
+            )
+            samples.append(round(value * 32767))
+        return cls._sound_from_samples(samples)
+
+    @classmethod
+    def _create_menu_sound(cls) -> pygame.mixer.Sound:
+        mixer_settings = pygame.mixer.get_init()
+        if mixer_settings is None:
+            raise RuntimeError("The audio mixer is not initialized.")
+        sample_rate = mixer_settings[0]
+        duration_seconds = 0.09
+        sample_count = int(sample_rate * duration_seconds)
+        samples = array("h")
+        for sample_index in range(sample_count):
+            progress = sample_index / sample_count
+            envelope = (1.0 - progress) ** 2
+            frequency = 1450 + 850 * progress
+            value = 0.3 * envelope * math.sin(
+                2 * math.pi * frequency * sample_index / sample_rate
+            )
+            samples.append(round(value * 32767))
+        return cls._sound_from_samples(samples)
+
+    @staticmethod
     def _create_level_game(level: int) -> ChessGame:
         if level == 1:
             return ChessGame(
@@ -275,7 +355,8 @@ class ChessApp:
             while self.running:
                 elapsed_seconds = self.clock.tick(120) / 1000
                 self._handle_events()
-                self._update_bot_turn()
+                if self.screen != "pause":
+                    self._update_bot_turn()
                 self._check_achievements()
                 self._advance_campaign_intro_zoom()
                 self._update_camera_follow(elapsed_seconds)
@@ -296,7 +377,7 @@ class ChessApp:
             self.active_level != 2
             or self.campaign_battle_active
             or self.campaign.king_dead
-            or self.screen == "war_victory"
+            or self.screen in ("war_victory", "pause")
         ):
             return
 
@@ -635,6 +716,15 @@ class ChessApp:
             ):
                 self.zoom = min(2.0, max(0.5, self.zoom * (1.1 ** event.y)))
                 self._follow_king_camera()
+            elif (
+                event.type == pygame.MOUSEMOTION
+                and self.screen == "pause"
+                and self.pause_slider_drag is not None
+            ):
+                if event.buttons[0]:
+                    self._set_audio_volume_from_position(
+                        self.pause_slider_drag, event.pos
+                    )
             elif event.type == pygame.MOUSEMOTION and self.pan_start is not None:
                 if event.buttons[0]:
                     delta = (
@@ -679,7 +769,13 @@ class ChessApp:
                 else:
                     self._handle_click(event.pos)
             elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
-                if self.pan_start is not None:
+                if self.pause_slider_drag is not None:
+                    self._set_audio_volume_from_position(
+                        self.pause_slider_drag, event.pos
+                    )
+                    self.pause_slider_drag = None
+                    save_audio_volumes(self.music_volume, self.sfx_volume)
+                elif self.pan_start is not None:
                     if not self.pan_moved:
                         self._handle_click(event.pos)
                     self.pan_start = None
@@ -695,6 +791,11 @@ class ChessApp:
         if self.boss_deployment_active:
             if key == pygame.K_ESCAPE:
                 self._cancel_boss_deployment()
+            return
+
+        if self.screen == "pause":
+            if key in (pygame.K_ESCAPE, pygame.K_RETURN, pygame.K_SPACE):
+                self.screen = "game"
             return
 
         if self.screen == "war_victory":
@@ -752,7 +853,7 @@ class ChessApp:
             elif self.selected is not None or self.pending_promotion:
                 self._clear_selection()
             else:
-                self.screen = "menu"
+                self.screen = "pause"
         elif key == pygame.K_z and modifiers & pygame.KMOD_CTRL:
             self._undo()
         elif key == pygame.K_p:
@@ -805,6 +906,31 @@ class ChessApp:
         if self.boss_deployment_active and self.screen != "menu":
             self._handle_boss_deployment_click(position)
             return
+        if self.screen == "pause":
+            if any(
+                rect.collidepoint(position)
+                for rect in (
+                    self.pause_resume_button,
+                    self.pause_menu_button,
+                    self.pause_music_slider.inflate(0, 20),
+                    self.pause_sfx_slider.inflate(0, 20),
+                )
+            ):
+                self._play_menu_sfx()
+            if self.pause_resume_button.collidepoint(position):
+                self.screen = "game"
+            elif self.pause_menu_button.collidepoint(position):
+                self.screen = "menu"
+            else:
+                for name, slider in (
+                    ("music", self.pause_music_slider),
+                    ("sfx", self.pause_sfx_slider),
+                ):
+                    if slider.inflate(0, 20).collidepoint(position):
+                        self.pause_slider_drag = name
+                        self._set_audio_volume_from_position(name, position)
+                        return
+            return
         if self.screen == "death":
             if (
                 not self.hardcore_enabled
@@ -828,6 +954,19 @@ class ChessApp:
                 self.tutorial_until = 0
             return
         if self.screen == "menu":
+            menu_controls = (
+                *self.level_buttons.values(),
+                *self.difficulty_buttons.values(),
+                self.menu_play_button,
+                self.menu_new_game_button,
+                self.menu_quit_button,
+                self.debug_menu_button,
+                self.tutorial_toggle_button,
+                self.language_toggle_button,
+                self.hardcore_toggle_button,
+            )
+            if any(rect.collidepoint(position) for rect in menu_controls):
+                self._play_menu_sfx()
             level_choice = next(
                 (
                     level
@@ -895,7 +1034,7 @@ class ChessApp:
             return
         if self.in_game_menu_button.collidepoint(position):
             self._clear_selection()
-            self.screen = "menu"
+            self.screen = "pause"
             return
         if self.active_level == 2 and self.undo_button.collidepoint(position):
             self._undo()
@@ -941,6 +1080,23 @@ class ChessApp:
             self.legal_moves = self.game.legal_moves_from(square)
         else:
             self._clear_selection()
+
+    def _set_audio_volume_from_position(
+        self, name: str, position: tuple[int, int]
+    ) -> None:
+        slider = (
+            self.pause_music_slider if name == "music" else self.pause_sfx_slider
+        )
+        volume = min(1.0, max(0.0, (position[0] - slider.left) / slider.width))
+        if name == "music":
+            self.music_volume = volume
+            self.music_channel.set_volume(volume)
+        else:
+            self.sfx_volume = volume
+            self.sfx_channel.set_volume(volume)
+
+    def _play_menu_sfx(self) -> None:
+        self.sfx_channel.play(self.sfx_sound)
 
     def _handle_campaign_board_click(self, position: tuple[int, int]) -> None:
         if self.pending_promotion or (
@@ -2397,6 +2553,8 @@ class ChessApp:
         self.status = "Souper na tahu..."
 
     def _update_bot_turn(self) -> None:
+        if self.screen == "pause":
+            return
         realtime_campaign = self._is_realtime_campaign()
         if self.bot_due_at is not None:
             if pygame.time.get_ticks() < self.bot_due_at:

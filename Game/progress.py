@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 from pathlib import Path
 
@@ -76,6 +77,36 @@ def save_hardcore_enabled(enabled: bool) -> None:
     data = _read_progress() if PROGRESS_FILE.exists() else {}
     data["hardcore_enabled"] = enabled
     _write_progress(data)
+
+
+def load_audio_volumes() -> tuple[float, float]:
+    if not PROGRESS_FILE.exists():
+        return 0.35, 0.65
+
+    data = _read_progress()
+    music_volume = _validated_audio_volume(
+        data.get("music_volume", 0.35), "music_volume"
+    )
+    sfx_volume = _validated_audio_volume(data.get("sfx_volume", 0.65), "sfx_volume")
+    return music_volume, sfx_volume
+
+
+def save_audio_volumes(music_volume: float, sfx_volume: float) -> None:
+    data = _read_progress() if PROGRESS_FILE.exists() else {}
+    data["music_volume"] = _validated_audio_volume(music_volume, "music_volume")
+    data["sfx_volume"] = _validated_audio_volume(sfx_volume, "sfx_volume")
+    _write_progress(data)
+
+
+def _validated_audio_volume(value: object, name: str) -> float:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or not 0 <= value <= 1
+    ):
+        raise ValueError(f"Invalid {name} in {PROGRESS_FILE}")
+    return float(value)
 
 
 def load_language() -> str:
