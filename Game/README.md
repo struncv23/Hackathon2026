@@ -205,7 +205,9 @@ textury; pro vymenu staci nahradit PNG soubory a hru znovu spustit.
 - Pokud hrac nema zadny dostupny tah, muze stisknout `P` a tah preskocit.
 - Zasahy kratce animuji ubytek HP, tymovy ukazatel zdravi a cislo poskozeni
   nad zasazenym polem. Tahy figurek se plynule presouvaji a hra obnovuje obraz
-  az 90krat za sekundu.
+  az 90krat za sekundu. Tahy a zasahy maji samostatne zvukove efekty; odemceni
+  achievementu se zobrazi animovanou kartou s kratkym originalnim znelkovym
+  efektem. Hlasitost techto zvuku se nastavuje posuvnikem SFX v pauze.
 
 Vlastni efekt lze dodat rendereru pres rozhrani `Effects`:
 

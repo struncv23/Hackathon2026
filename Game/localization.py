@@ -318,6 +318,8 @@ ENGLISH: dict[str, str] = {
     "Splneno! +5000 zlata": "Completed! +5000 gold",
     "Odměna: 5000 zlata": "Reward: 5000 gold",
     "Achievement:": "Achievement:",
+    "Achievement odemcen": "Achievement unlocked",
+    "+5000 zlata": "+5000 gold",
     "Baller": "Baller",
     "Businessman": "Businessman",
     "Zabijak": "Pawn Slayer",

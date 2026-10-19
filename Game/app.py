@@ -80,6 +80,9 @@ OPENING_RESULT_DURATION_MS = 4200
 CAMPAIGN_MAP_VIEWPORT_LEFT = 236
 ACHIEVEMENT_REWARD = 5_000
 ACHIEVEMENT_NOTIFICATION_DURATION_MS = 6500
+OPPONENT_THINK_MIN_MS = 1000
+OPPONENT_THINK_MAX_MS = 3000
+MOVE_ANIMATION_DURATION_SECONDS = 0.24
 ACHIEVEMENTS = (
     ("baller", "Baller", "Ziskej 12 dam v armade."),
     ("businessman", "Businessman", "Postav vsech 12 farem."),
@@ -231,9 +234,27 @@ class ChessApp:
         self.sfx_channel = pygame.mixer.Channel(1)
         self.music_sound = self._create_background_music()
         self.sfx_sound = self._create_menu_sound()
+        self.move_sound = self._create_gameplay_sound(
+            (620.0,), 0.075, amplitude=0.13
+        )
+        self.damage_sound = self._create_gameplay_sound(
+            (190.0, 143.0), 0.18, amplitude=0.20, stagger_seconds=0.035
+        )
+        self.achievement_sound = self._create_gameplay_sound(
+            (523.25, 659.25, 783.99, 1046.5),
+            0.62,
+            amplitude=0.18,
+            stagger_seconds=0.105,
+        )
         self.music_channel.set_volume(self.music_volume)
         self.music_channel.play(self.music_sound, loops=-1)
         self.sfx_channel.set_volume(self.sfx_volume)
+        self.move_channel = pygame.mixer.Channel(2)
+        self.damage_channel = pygame.mixer.Channel(3)
+        self.achievement_channel = pygame.mixer.Channel(4)
+        self.move_channel.set_volume(self.sfx_volume)
+        self.damage_channel.set_volume(self.sfx_volume)
+        self.achievement_channel.set_volume(self.sfx_volume)
         self.last_action_was_bot = False
         self.bot_executor = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="chess-bot"
@@ -271,6 +292,7 @@ class ChessApp:
         self.opening_transition_started_at: int | None = None
         self.achievement_return_screen = "menu"
         self.achievement_notifications: list[tuple[str, int]] = []
+        self.pending_achievement_sounds = 0
         self.campaign_intro_zoom_started_at: int | None = None
         self.banter_started_at = pygame.time.get_ticks()
         self.boss_deployment: dict[str, int] = {
@@ -412,6 +434,40 @@ class ChessApp:
             samples.append(round(value * 32767))
         return cls._sound_from_samples(samples)
 
+    @classmethod
+    def _create_gameplay_sound(
+        cls,
+        frequencies: tuple[float, ...],
+        duration_seconds: float,
+        *,
+        amplitude: float,
+        stagger_seconds: float = 0.0,
+    ) -> pygame.mixer.Sound:
+        mixer_settings = pygame.mixer.get_init()
+        if mixer_settings is None:
+            raise RuntimeError("The audio mixer is not initialized.")
+        sample_rate = mixer_settings[0]
+        sample_count = int(sample_rate * duration_seconds)
+        samples = array("h")
+        note_count = len(frequencies)
+        for sample_index in range(sample_count):
+            time_seconds = sample_index / sample_rate
+            value = 0.0
+            for note_index, frequency in enumerate(frequencies):
+                note_time = time_seconds - note_index * stagger_seconds
+                if note_time < 0:
+                    continue
+                attack = min(1.0, note_time / 0.012)
+                decay = math.exp(-4.2 * note_time / duration_seconds)
+                fundamental = math.sin(2 * math.pi * frequency * note_time)
+                overtone = 0.28 * math.sin(
+                    2 * math.pi * frequency * 2.01 * note_time
+                )
+                value += (fundamental + overtone) * attack * decay
+            value = amplitude * value / max(1, note_count)
+            samples.append(round(max(-1.0, min(1.0, value)) * 32767))
+        return cls._sound_from_samples(samples)
+
     @staticmethod
     def _create_level_game(level: int) -> ChessGame:
         if level == 1:
@@ -448,6 +504,7 @@ class ChessApp:
                 elif self.bot_due_at is not None:
                     self.bot_due_at += round(elapsed_seconds * 1000)
                 self._check_achievements()
+                self._update_achievement_sfx()
                 self._advance_campaign_intro_zoom()
                 self._update_camera_follow(elapsed_seconds)
                 self._draw()
@@ -526,6 +583,7 @@ class ChessApp:
                 self.damage_popups.append(
                     (king_square, health_before - health_after, now)
                 )
+                self._play_damage_sfx()
                 if health_after == 0:
                     self.campaign.king_dead = True
                     self.campaign.king_death_reason = (
@@ -1126,6 +1184,7 @@ class ChessApp:
             self._undo()
         elif key == pygame.K_p:
             if self.game.pass_turn():
+                self._play_move_sfx()
                 self.status = self.game.status()
                 self._clear_selection()
                 self.last_action_was_bot = False
@@ -1479,10 +1538,33 @@ class ChessApp:
             self.music_channel.set_volume(volume)
         else:
             self.sfx_volume = volume
-            self.sfx_channel.set_volume(volume)
+            for channel in (
+                self.sfx_channel,
+                self.move_channel,
+                self.damage_channel,
+                self.achievement_channel,
+            ):
+                channel.set_volume(volume)
 
     def _play_menu_sfx(self) -> None:
         self.sfx_channel.play(self.sfx_sound)
+
+    def _play_move_sfx(self) -> None:
+        self.move_channel.play(self.move_sound)
+
+    def _play_damage_sfx(self) -> None:
+        self.damage_channel.play(self.damage_sound)
+
+    def _play_achievement_sfx(self) -> None:
+        self.pending_achievement_sounds += 1
+
+    def _update_achievement_sfx(self) -> None:
+        if (
+            self.pending_achievement_sounds > 0
+            and not self.achievement_channel.get_busy()
+        ):
+            self.achievement_channel.play(self.achievement_sound)
+            self.pending_achievement_sounds -= 1
 
     def _handle_campaign_board_click(self, position: tuple[int, int]) -> None:
         if self.pending_promotion or (
@@ -1881,8 +1963,7 @@ class ChessApp:
         team_health_before = self.game.team_health.copy()
         raiders_defeated = 0
         if self.game.play(move):
-            if self.active_level == 1 and self._track_opening_position():
-                return
+            self._play_move_sfx()
             if (
                 realtime_campaign
                 and moving_piece is not None
@@ -1941,6 +2022,9 @@ class ChessApp:
             if potion_heal:
                 self.status = f"Kral se vylecil o {potion_heal} HP."
             self._record_damage_animations(team_health_before)
+            if self.active_level == 1 and self._track_opening_position():
+                self._clear_selection()
+                return
             self._sync_campaign_progress()
             if self.game is not game_before:
                 self._clear_selection()
@@ -3203,13 +3287,17 @@ class ChessApp:
                 return
             if self.bot_due_at is not None or self.bot_future is not None:
                 return
-            self.bot_due_at = pygame.time.get_ticks() + random.randint(250, 500)
+            self.bot_due_at = pygame.time.get_ticks() + random.randint(
+                OPPONENT_THINK_MIN_MS, OPPONENT_THINK_MAX_MS
+            )
             self.status = "Souper rozviji kralovstvi..."
             return
         if self.game.turn != BLACK or self.game.winner() is not None:
             self.status = self.game.status()
             return
-        self.bot_due_at = pygame.time.get_ticks() + random.randint(120, 260)
+        self.bot_due_at = pygame.time.get_ticks() + random.randint(
+            OPPONENT_THINK_MIN_MS, OPPONENT_THINK_MAX_MS
+        )
         self.status = "Souper na tahu..."
 
     def _current_bot_difficulty(self) -> str:
@@ -3267,6 +3355,7 @@ class ChessApp:
                 self._schedule_bot_turn()
                 return
             if self.game.pass_turn():
+                self._play_move_sfx()
                 self.status = self.game.status()
                 self.last_action_was_bot = True
                 return
@@ -3309,8 +3398,7 @@ class ChessApp:
                 self._schedule_bot_turn()
                 return
 
-        if self.active_level == 1 and self._track_opening_position():
-            return
+        self._play_move_sfx()
         if moving_piece is not None:
             self.piece_move_animation = (
                 moving_piece,
@@ -3322,6 +3410,8 @@ class ChessApp:
             self.game.turn = WHITE
         self.status = self.game.status()
         self._record_damage_animations(team_health_before)
+        if self.active_level == 1 and self._track_opening_position():
+            return
         self.last_action_was_bot = True
         self._sync_campaign_progress()
         if self.game is not game_before:
@@ -3386,6 +3476,11 @@ class ChessApp:
             after = self.game.team_health[color]
             if before != after:
                 self.team_health_animations[color] = (before, after, started_at)
+        if self.game.last_damage or any(
+            self.game.team_health[color] < team_health_before[color]
+            for color in (WHITE, BLACK)
+        ):
+            self._play_damage_sfx()
 
         damage_by_square: dict[tuple[int, int], int] = {}
         for square, damage in self.game.last_damage:
@@ -3493,6 +3588,7 @@ class ChessApp:
             self.campaign.unlocked_achievements.append(achievement_id)
             self.campaign.player.coins += ACHIEVEMENT_REWARD
             self.achievement_notifications.append((achievement_id, now))
+            self._play_achievement_sfx()
             self._mark_campaign_dirty()
 
     def _draw_achievements(self) -> None:
@@ -3563,35 +3659,77 @@ class ChessApp:
             for achievement_id, started_at in self.achievement_notifications
             if now - started_at < ACHIEVEMENT_NOTIFICATION_DURATION_MS
         ]
-        for index, (achievement_id, _) in enumerate(
+        for index, (achievement_id, started_at) in enumerate(
             self.achievement_notifications[-len(ACHIEVEMENTS):]
         ):
-            rect = pygame.Rect(690, 18 + index * 72, 330, 62)
-            pygame.draw.rect(self.surface, (38, 55, 43), rect, border_radius=8)
+            elapsed = now - started_at
+            entrance = min(1.0, max(0.0, elapsed / 380))
+            entrance = entrance * entrance * (3 - 2 * entrance)
+            remaining = ACHIEVEMENT_NOTIFICATION_DURATION_MS - elapsed
+            exit_progress = min(1.0, max(0.0, remaining / 450))
+            exit_progress = exit_progress * exit_progress * (
+                3 - 2 * exit_progress
+            )
+            slide = min(entrance, exit_progress)
+            rect = pygame.Rect(
+                round(1040 - 350 * slide), 18 + index * 72, 330, 62
+            )
+            toast = pygame.Surface(rect.size, pygame.SRCALPHA)
             pygame.draw.rect(
-                self.surface,
-                (224, 190, 119),
-                rect,
+                toast, (38, 55, 43, 240), toast.get_rect(), border_radius=8
+            )
+            pygame.draw.rect(
+                toast,
+                (224, 190, 119, 255),
+                toast.get_rect(),
                 width=2,
                 border_radius=8,
+            )
+            badge_center = (30, 31)
+            pygame.draw.circle(toast, (34, 40, 34), badge_center, 22)
+            pygame.draw.circle(toast, (228, 185, 88), badge_center, 18)
+            pygame.draw.circle(toast, (255, 234, 151), badge_center, 13)
+            pygame.draw.polygon(
+                toast,
+                (133, 91, 39),
+                (
+                    (30, 18),
+                    (33, 27),
+                    (42, 27),
+                    (35, 32),
+                    (38, 41),
+                    (30, 35),
+                    (22, 41),
+                    (25, 32),
+                    (18, 27),
+                    (27, 27),
+                ),
             )
             name = next(
                 name
                 for item_id, name, _ in ACHIEVEMENTS
                 if item_id == achievement_id
             )
-            self._text(
-                f"Achievement: {name}",
-                self.small_font,
-                (255, 232, 177),
-                (rect.x + 12, rect.y + 7),
+            title = translate("Achievement odemcen", self.language)
+            reward = translate("+5000 zlata", self.language)
+            toast.blit(
+                self._cached_text(title, self.small_font, (255, 232, 177)),
+                (54, 7),
             )
-            self._text(
-                "+5000 zlata",
-                self.small_font,
-                (220, 235, 214),
-                (rect.x + 12, rect.y + 34),
+            toast.blit(
+                self._cached_text(
+                    name, self.small_font, (255, 249, 220)
+                ),
+                (54, 25),
             )
+            toast.blit(
+                self._cached_text(
+                    reward, self.small_font, (220, 235, 214)
+                ),
+                (54, 42),
+            )
+            toast.set_alpha(round(255 * slide))
+            self.surface.blit(toast, rect)
 
     def _draw(self) -> None:
         now = pygame.time.get_ticks() / 1000
@@ -3648,7 +3786,8 @@ class ChessApp:
 
         if (
             self.piece_move_animation is not None
-            and now - self.piece_move_animation[3] >= 0.18
+            and now - self.piece_move_animation[3]
+            >= MOVE_ANIMATION_DURATION_SECONDS
         ):
             self.piece_move_animation = None
 
@@ -3671,6 +3810,7 @@ class ChessApp:
             buildings=self._building_visuals(),
             boss_chest_tiles=self._boss_chest_tiles(),
             piece_animation=self.piece_move_animation,
+            piece_animation_duration=MOVE_ANIMATION_DURATION_SECONDS,
             viewport_rect=(
                 self._campaign_map_viewport()
                 if self.active_level == 2 and not self.campaign_battle_active

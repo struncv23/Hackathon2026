@@ -129,6 +129,7 @@ class BoardRenderer:
         king_scale: float = 1.0,
         king_health_ratio: float | None = None,
         hidden_piece_square: tuple[int, int] | None = None,
+        piece_animation_duration: float = 0.24,
     ) -> None:
         destinations = {move.end for move in legal_moves}
         mines = mines or {}
@@ -276,7 +277,10 @@ class BoardRenderer:
             )
         if piece_animation is not None:
             piece, start, end, started_at = piece_animation
-            progress = min(1.0, max(0.0, (now - started_at) / 0.18))
+            progress = min(
+                1.0,
+                max(0.0, (now - started_at) / max(0.001, piece_animation_duration)),
+            )
             eased = progress * progress * (3 - 2 * progress)
             row = start[0] + (end[0] - start[0]) * eased
             col = start[1] + (end[1] - start[1]) * eased
@@ -842,6 +846,34 @@ class BoardRenderer:
                 round(origin_y + (row - camera[0]) * square_size)
                 - int(progress * square_size),
             )
+            impact_center = (
+                round(origin_x + (col + 0.5 - camera[1]) * square_size),
+                round(origin_y + (row + 0.5 - camera[0]) * square_size),
+            )
+            impact_progress = min(1.0, progress / 0.55)
+            impact_radius = max(2, round(square_size * (0.12 + impact_progress * 0.43)))
+            fade = 1.0 - impact_progress
+            ring_color = (
+                round(96 + 159 * fade),
+                round(49 + 74 * fade),
+                round(43 + 38 * fade),
+            )
+            pygame.draw.circle(
+                surface,
+                ring_color,
+                impact_center,
+                impact_radius,
+                max(1, square_size // 18),
+            )
+            if impact_progress < 0.72:
+                inner_radius = max(1, round(impact_radius * 0.58))
+                pygame.draw.circle(
+                    surface,
+                    (255, 204, 132),
+                    impact_center,
+                    inner_radius,
+                    1,
+                )
             surface.blit(label, position)
 
 
