@@ -32,11 +32,6 @@ def _font(size: int, bold: bool = False) -> pygame.font.Font:
     return pygame.font.SysFont("consolas", size, bold=bold)
 
 
-@lru_cache(maxsize=16)
-def _raider_label(size: int) -> pygame.Surface:
-    return _font(size, bold=True).render("P", True, (255, 235, 216))
-
-
 class BoardRenderer:
     PIECE_PIXELS = {
         "K": (
@@ -132,6 +127,8 @@ class BoardRenderer:
         language: str = "cs",
         piece_opacity: float = 1.0,
         king_scale: float = 1.0,
+        king_health_ratio: float | None = None,
+        hidden_piece_square: tuple[int, int] | None = None,
     ) -> None:
         destinations = {move.end for move in legal_moves}
         mines = mines or {}
@@ -201,6 +198,7 @@ class BoardRenderer:
                 if (
                     piece is not None
                     and not is_animated_destination
+                    and (row, col) != hidden_piece_square
                 ):
                     self._draw_piece_with_opacity(
                         surface,
@@ -218,6 +216,9 @@ class BoardRenderer:
                         if piece.color == WHITE and piece.kind == "K"
                         else 1.0,
                         health_scale,
+                        king_health_ratio
+                        if piece.color == WHITE and piece.kind == "K"
+                        else None,
                     )
                 if col == 0:
                     label = self.coordinate_font.render(
@@ -267,6 +268,7 @@ class BoardRenderer:
                     piece_opacity,
                     king_scale,
                     health_scale,
+                    king_health_ratio,
                 )
         if boss_chest_tiles:
             self._draw_boss_chest(
@@ -300,6 +302,9 @@ class BoardRenderer:
                 if piece.color == WHITE and piece.kind == "K"
                 else 1.0,
                 health_scale,
+                king_health_ratio
+                if piece.color == WHITE and piece.kind == "K"
+                else None,
             )
         self._draw_raiders(surface, raiders, camera, square_size, board_origin)
         self._draw_damage_popups(
@@ -307,8 +312,8 @@ class BoardRenderer:
         )
         surface.set_clip(previous_clip)
 
-    @staticmethod
     def _draw_raiders(
+        self,
         surface: pygame.Surface,
         raiders: list[tuple[float, float]],
         camera: tuple[float, float],
@@ -320,11 +325,24 @@ class BoardRenderer:
                 round(board_origin[0] + (col + 0.5 - camera[1]) * square_size),
                 round(board_origin[1] + (row + 0.5 - camera[0]) * square_size),
             )
-            radius = max(5, square_size // 3)
-            pygame.draw.circle(surface, (37, 25, 25), center, radius + 2)
-            pygame.draw.circle(surface, (151, 52, 47), center, radius)
-            label = _raider_label(max(10, square_size // 2))
-            surface.blit(label, label.get_rect(center=center))
+            pygame.draw.ellipse(
+                surface,
+                (37, 25, 25),
+                pygame.Rect(
+                    center[0] - square_size // 3,
+                    center[1] + square_size // 4,
+                    square_size * 2 // 3,
+                    max(3, square_size // 5),
+                ),
+            )
+            pawn_rect = pygame.Rect(
+                0,
+                0,
+                max(16, round(square_size * 0.9)),
+                max(16, round(square_size * 0.9)),
+            )
+            pawn_rect.center = center
+            self.draw_piece_sprite(surface, pawn_rect, "P", "black")
 
     @staticmethod
     def _draw_cooldown_bar(
@@ -628,6 +646,7 @@ class BoardRenderer:
         now: float,
         cooldown_progress: float | None = None,
         health_scale: float = 1.0,
+        health_ratio_override: float | None = None,
     ) -> None:
         self.draw_piece_sprite(surface, rect, piece.kind, piece.color)
         cooldown_height = (
@@ -644,7 +663,11 @@ class BoardRenderer:
             health_height,
         )
         pygame.draw.rect(surface, (31, 37, 34), health_rect)
-        ratio = self._health_ratio(piece, health_animation, now, health_scale)
+        ratio = (
+            max(0.0, min(1.0, health_ratio_override))
+            if health_ratio_override is not None
+            else self._health_ratio(piece, health_animation, now, health_scale)
+        )
         if ratio > 0:
             health_color = (
                 int(224 * (1 - ratio) + 72 * ratio),
@@ -675,6 +698,7 @@ class BoardRenderer:
         opacity: float,
         scale: float = 1.0,
         health_scale: float = 1.0,
+        health_ratio_override: float | None = None,
     ) -> None:
         opacity = min(1.0, max(0.0, opacity))
         scale = max(0.1, scale)
@@ -687,6 +711,7 @@ class BoardRenderer:
                 now,
                 cooldown_progress,
                 health_scale,
+                health_ratio_override,
             )
             return
         piece_size = (
@@ -702,6 +727,7 @@ class BoardRenderer:
             now,
             cooldown_progress,
             health_scale,
+            health_ratio_override,
         )
         piece_surface.set_alpha(round(opacity * 255))
         surface.blit(piece_surface, piece_surface.get_rect(center=rect.center))

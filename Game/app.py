@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 from concurrent.futures import Future, ThreadPoolExecutor
+from collections import OrderedDict, deque
 from copy import deepcopy
-from collections import OrderedDict
 import math
 import random
 from array import array
@@ -34,6 +34,7 @@ from .constants import (
 from .bot import choose_move
 from .campaign import (
     ARMY_KINDS,
+    ARMY_LIMIT,
     ARMORY_COST,
     ARMY_UPGRADE_COSTS,
     CITY_COST,
@@ -70,6 +71,13 @@ CAMPAIGN_INTRO_ZOOM_DURATION_MS = 4500
 CAMPAIGN_INTRO_START_ZOOM = 2.0
 CAMERA_FOLLOW_SPEED = 14.0
 WAR_VICTORY_SURRENDER_DURATION_MS = 4200
+DIPLOMACY_REPLY_MIN_MS = 3000
+DIPLOMACY_REPLY_MAX_MS = 5000
+WAR_KING_MARCH_DURATION_MS = 3000
+WAR_DEPLOYMENT_LIMIT = 8
+FINAL_BATTLE_COUNTDOWN_SECONDS = 5 * 60
+OPENING_RESULT_DURATION_MS = 4200
+CAMPAIGN_MAP_VIEWPORT_LEFT = 236
 ACHIEVEMENT_REWARD = 5_000
 ACHIEVEMENT_NOTIFICATION_DURATION_MS = 6500
 ACHIEVEMENTS = (
@@ -138,6 +146,10 @@ class ChessApp:
         self.font = pygame.font.SysFont("consolas", 22)
         self.small_font = pygame.font.SysFont("consolas", 16)
         self.title_font = pygame.font.SysFont("consolas", 30, bold=True)
+        self.diplomacy_font = pygame.font.SysFont("consolas", 13)
+        self.diplomacy_bold_font = pygame.font.SysFont(
+            "consolas", 13, bold=True
+        )
         self.selected: tuple[int, int] | None = None
         self.legal_moves: list[Move] = []
         self.pending_promotion: list[Move] = []
@@ -169,6 +181,13 @@ class ChessApp:
         self.debug_add_gold_button = pygame.Rect(370, 420, 300, 56)
         self.debug_add_random_gold_button = pygame.Rect(370, 492, 300, 56)
         self.debug_back_button = pygame.Rect(370, 564, 300, 56)
+        self.opening_debug_button = pygame.Rect(810, 108, 190, 38)
+        self.opening_debug_buttons = {
+            "white": pygame.Rect(810, 170, 190, 38),
+            "black": pygame.Rect(810, 214, 190, 38),
+            "draw": pygame.Rect(810, 258, 190, 38),
+        }
+        self.opening_debug_visible = False
         self.tutorial_toggle_button = pygame.Rect(790, 20, 210, 40)
         self.language_toggle_button = pygame.Rect(790, 68, 210, 40)
         self.hardcore_toggle_button = pygame.Rect(790, 116, 210, 40)
@@ -179,9 +198,34 @@ class ChessApp:
         self.in_game_menu_button = pygame.Rect(720, 726, 280, 30)
         self.pause_resume_button = pygame.Rect(380, 500, 280, 52)
         self.pause_menu_button = pygame.Rect(380, 566, 280, 52)
-        self.pause_music_slider = pygame.Rect(390, 350, 260, 12)
-        self.pause_sfx_slider = pygame.Rect(390, 438, 260, 12)
+        self.pause_level_buttons = {
+            1: pygame.Rect(105, 170, 190, 48),
+            2: pygame.Rect(315, 170, 190, 48),
+        }
+        self.pause_tutorial_button = pygame.Rect(105, 270, 400, 44)
+        self.pause_language_button = pygame.Rect(105, 328, 400, 44)
+        self.pause_hardcore_button = pygame.Rect(105, 386, 400, 44)
+        self.pause_music_slider = pygame.Rect(610, 220, 280, 12)
+        self.pause_sfx_slider = pygame.Rect(610, 330, 280, 12)
+        self.pause_resume_button = pygame.Rect(570, 590, 200, 52)
+        self.pause_menu_button = pygame.Rect(790, 590, 170, 52)
         self.pause_slider_drag: str | None = None
+        self.diplomacy_panel_rect = pygame.Rect(8, 80, 220, 490)
+        self.diplomacy_choice_buttons = [
+            pygame.Rect(18, 390 + index * 40, 200, 34)
+            for index in range(4)
+        ]
+        self.diplomacy_panel_surface = pygame.Surface(
+            self.diplomacy_panel_rect.size, pygame.SRCALPHA
+        )
+        self.diplomacy_panel_surface.fill((20, 27, 24, 238))
+        pygame.draw.rect(
+            self.diplomacy_panel_surface,
+            (205, 169, 99),
+            self.diplomacy_panel_surface.get_rect(),
+            width=2,
+            border_radius=10,
+        )
         self.music_volume, self.sfx_volume = load_audio_volumes()
         self.music_channel = pygame.mixer.Channel(0)
         self.sfx_channel = pygame.mixer.Channel(1)
@@ -209,8 +253,22 @@ class ChessApp:
         self._campaign_navigation_game: ChessGame | None = None
         self.campaign_battle_active = False
         self.boss_deployment_active = False
+        self.war_deployment_active = False
         self.boss_battle_active = False
+        self.diplomacy_reply_text: str | None = None
+        self.diplomacy_reply_elapsed_ms = 0.0
+        self.diplomacy_reply_duration_ms = 0
+        self.war_march_path: list[tuple[int, int]] | None = None
+        self.war_march_king: Piece | None = None
+        self.war_march_elapsed_ms = 0.0
+        self.war_deployment_limit = 0
         self.war_victory_started_at: int | None = None
+        self.war_victory_is_final_battle = False
+        self.war_victory_won = False
+        self.final_battle_active = False
+        self.opening_position_counts: dict[tuple[object, ...], int] = {}
+        self.opening_transition_outcome: str | None = None
+        self.opening_transition_started_at: int | None = None
         self.achievement_return_screen = "menu"
         self.achievement_notifications: list[tuple[str, int]] = []
         self.campaign_intro_zoom_started_at: int | None = None
@@ -297,21 +355,41 @@ class ChessApp:
         if mixer_settings is None:
             raise RuntimeError("The audio mixer is not initialized.")
         sample_rate = mixer_settings[0]
-        duration_seconds = 8
-        melody = (261.63, 329.63, 392.0, 329.63, 293.66, 349.23, 440.0, 349.23)
+        duration_seconds = 10
+        melody = (
+            392.00, 440.00, 523.25, 587.33, 523.25,
+            440.00, 392.00, 329.63, 349.23, 392.00,
+            440.00, 523.25, 440.00, 392.00, 349.23,
+            329.63, 392.00, 349.23, 293.66, 329.63,
+        )
+        bass_notes = (98.00, 130.81, 110.00, 146.83, 98.00)
         samples = array("h")
         for sample_index in range(sample_rate * duration_seconds):
             time_seconds = sample_index / sample_rate
-            beat = int(time_seconds)
-            note_progress = time_seconds - beat
-            envelope = min(1.0, note_progress / 0.06, (1.0 - note_progress) / 0.1)
-            frequency = melody[beat % len(melody)]
-            value = envelope * (
-                0.24 * math.sin(2 * math.pi * frequency * time_seconds)
-                + 0.09 * math.sin(2 * math.pi * frequency * 2 * time_seconds)
-                + 0.12 * math.sin(2 * math.pi * 110 * time_seconds)
-                + 0.08 * math.sin(2 * math.pi * 55 * time_seconds)
+            beat_index = int(time_seconds / 0.5)
+            beat_time = time_seconds % 0.5
+            melody_frequency = melody[beat_index % len(melody)]
+            melody_envelope = min(
+                1.0,
+                beat_time / 0.018,
+                max(0.0, (0.46 - beat_time) / 0.12),
             )
+            bass_index = int(time_seconds / 2.0) % len(bass_notes)
+            bass_time = time_seconds % 2.0
+            bass_envelope = min(
+                1.0,
+                bass_time / 0.025,
+                max(0.0, (1.5 - bass_time) / 0.35),
+            )
+            melody_tone = (
+                math.sin(2 * math.pi * melody_frequency * time_seconds)
+                + 0.2
+                * math.sin(2 * math.pi * melody_frequency * 2 * time_seconds)
+            )
+            bass_tone = math.sin(
+                2 * math.pi * bass_notes[bass_index] * time_seconds
+            )
+            value = 0.26 * melody_envelope * melody_tone + 0.18 * bass_envelope * bass_tone
             samples.append(round(value * 32767))
         return cls._sound_from_samples(samples)
 
@@ -357,8 +435,18 @@ class ChessApp:
             while self.running:
                 elapsed_seconds = self.clock.tick(120) / 1000
                 self._handle_events()
-                if self.screen != "pause":
+                self._advance_diplomacy(elapsed_seconds)
+                self._advance_war_march(elapsed_seconds)
+                self._advance_opening_transition()
+                shop_is_open = (
+                    self.active_level == 2
+                    and self.shop_menu is not None
+                    and not self.campaign_battle_active
+                )
+                if self.screen == "game" and not shop_is_open:
                     self._update_bot_turn()
+                elif self.bot_due_at is not None:
+                    self.bot_due_at += round(elapsed_seconds * 1000)
                 self._check_achievements()
                 self._advance_campaign_intro_zoom()
                 self._update_camera_follow(elapsed_seconds)
@@ -378,8 +466,12 @@ class ChessApp:
         if (
             self.active_level != 2
             or self.campaign_battle_active
+            or self.shop_menu is not None
+            or self.diplomacy_reply_text is not None
+            or self.war_march_path is not None
+            or self.war_deployment_active
             or self.campaign.king_dead
-            or self.screen in ("war_victory", "pause")
+            or self.screen != "game"
         ):
             return
 
@@ -402,6 +494,16 @@ class ChessApp:
             self.game.board_size,
             blocked_raider_squares,
         )
+        final_battle_due = False
+        if self.campaign.final_battle_countdown is not None:
+            self.campaign.final_battle_countdown = max(
+                0.0,
+                self.campaign.final_battle_countdown - elapsed_seconds,
+            )
+            if self.campaign.final_battle_countdown == 0:
+                self.campaign.final_battle_countdown = None
+                self.campaign.final_battle_pending = True
+                final_battle_due = True
         king_square = self._king_square(WHITE)
         if self.campaign.raiders and king_square is not None:
             health_before = self.game.team_health[WHITE]
@@ -410,6 +512,7 @@ class ChessApp:
                 king_square,
                 blocked_raider_squares,
                 self.game.board_size,
+                king_max_health=self.game.team_health_max[WHITE],
             )
             if raider_damage:
                 health_after = max(0, health_before - raider_damage)
@@ -499,6 +602,127 @@ class ChessApp:
             changed = True
         if changed or earned:
             self._mark_campaign_dirty()
+        if final_battle_due and not self.campaign.king_dead:
+            self._mark_campaign_dirty()
+            self._begin_final_battle_deployment()
+        elif final_battle_due:
+            self._mark_campaign_dirty()
+
+    def _advance_diplomacy(self, elapsed_seconds: float) -> None:
+        if (
+            self.diplomacy_reply_text is None
+            or self.screen != "game"
+            or self.shop_menu is not None
+            or self.active_level != 2
+        ):
+            return
+        self.diplomacy_reply_elapsed_ms += max(0.0, elapsed_seconds) * 1000
+        if self.diplomacy_reply_elapsed_ms < self.diplomacy_reply_duration_ms:
+            return
+
+        war_was_declared = self.campaign.rival_war_declared
+        self.campaign.finish_diplomacy()
+        self.diplomacy_reply_text = None
+        self.diplomacy_reply_elapsed_ms = 0.0
+        self.diplomacy_reply_duration_ms = 0
+        self._mark_campaign_dirty()
+        if not war_was_declared and self.campaign.rival_war_declared:
+            self._ensure_campaign_potions()
+            self._begin_war_march()
+
+    def _advance_war_march(self, elapsed_seconds: float) -> None:
+        if (
+            self.war_march_path is None
+            or self.screen != "game"
+            or self.shop_menu is not None
+        ):
+            return
+        self.war_march_elapsed_ms += max(0.0, elapsed_seconds) * 1000
+        if self.war_march_elapsed_ms < WAR_KING_MARCH_DURATION_MS:
+            return
+
+        if self.war_march_king is not None and self.war_march_path:
+            start = self._king_square(WHITE)
+            destination = self.war_march_path[-1]
+            if start is not None:
+                self.game.board[start[0]][start[1]] = None
+            self.game.board[destination[0]][destination[1]] = self.war_march_king
+            self._record_campaign_square(destination)
+        self.war_march_path = None
+        self.war_march_king = None
+        self.war_march_elapsed_ms = 0.0
+        self._begin_war_deployment()
+
+    def _opening_position_key(self) -> tuple[object, ...]:
+        board = tuple(
+            tuple(
+                None
+                if piece is None
+                else (
+                    piece.color,
+                    piece.kind,
+                    piece.health,
+                    piece.level,
+                    piece.experience,
+                    tuple(sorted(piece.upgrades)),
+                )
+                for piece in row
+            )
+            for row in self.game.board
+        )
+        return (
+            board,
+            self.game.turn,
+            tuple(sorted(self.game.castling_rights)),
+            self.game.en_passant_target,
+        )
+
+    def _track_opening_position(self) -> bool:
+        if self.active_level != 1 or self.screen != "game":
+            return False
+        key = self._opening_position_key()
+        occurrences = self.opening_position_counts.get(key, 0) + 1
+        self.opening_position_counts[key] = occurrences
+        if occurrences < 5:
+            return False
+        self._finish_opening_match("draw")
+        return True
+
+    def _finish_opening_match(self, outcome: str) -> None:
+        if outcome not in ("win", "loss", "draw"):
+            raise ValueError(f"Invalid opening battle outcome: {outcome}")
+        self._cancel_bot_turn()
+        self._clear_selection()
+        self.opening_transition_outcome = outcome
+        self.opening_transition_started_at = pygame.time.get_ticks()
+        self.screen = f"opening_{outcome}"
+        self.status = {
+            "win": "Vyhrál jsi úvodní bitvu.",
+            "loss": "Černý král tě porazil.",
+            "draw": "Pětkrát se opakovala stejná pozice. Remíza.",
+        }[outcome]
+
+    def _advance_opening_transition(self, *, force: bool = False) -> None:
+        started_at = self.opening_transition_started_at
+        outcome = self.opening_transition_outcome
+        if started_at is None or outcome is None:
+            return
+        if (
+            not force
+            and pygame.time.get_ticks() - started_at < OPENING_RESULT_DURATION_MS
+        ):
+            return
+        self.opening_transition_started_at = None
+        self.opening_transition_outcome = None
+        if outcome == "win":
+            self.unlocked_level = max(self.unlocked_level, 2)
+            save_unlocked_level(self.unlocked_level)
+            self.selected_level = 2
+            self._start_new_game(reset_campaign=False, abandon_current=True)
+        else:
+            self.selected_level = 1
+            self._start_new_game(reset_campaign=False, abandon_current=True)
+        self.screen = "game"
 
     def _king_square(
         self, color: str, game: ChessGame | None = None
@@ -673,24 +897,21 @@ class ChessApp:
         king = self.game.piece_at(square)
         if king is None or king.kind != "K" or king.color != WHITE:
             return 0
-        old_health = king.health or 0
-        new_health = min(king.max_health, old_health + POTION_HEAL)
-        if new_health == old_health:
+        old_health = self.game.team_health[WHITE]
+        new_health = min(
+            self.game.team_health_max[WHITE],
+            old_health + POTION_HEAL,
+        )
+        if new_health <= old_health:
             return 0
+        self.game.team_health[WHITE] = new_health
         self.campaign.potions.remove(square)
         self.campaign.king_potion_heals += 1
-        self.game.board[square[0]][square[1]] = Piece(
-            king.color,
-            king.kind,
-            king.level,
-            king.experience,
-            new_health,
-            king.upgrades,
-        )
-        self.piece_health_animations[square] = (
+        now = pygame.time.get_ticks() / 1000
+        self.team_health_animations[WHITE] = (
             old_health,
             new_health,
-            pygame.time.get_ticks() / 1000,
+            now,
         )
         self.campaign.potion_respawns.append(
             self.campaign.realtime_seconds + PICKUP_RESPAWN_DELAY
@@ -707,7 +928,10 @@ class ChessApp:
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 self.running = False
-            elif self.campaign_intro_zoom_started_at is not None:
+            elif (
+                self.campaign_intro_zoom_started_at is not None
+                and event.type != pygame.KEYDOWN
+            ):
                 continue
             elif event.type == pygame.KEYDOWN:
                 self._handle_key(event.key, event.mod)
@@ -744,7 +968,24 @@ class ChessApp:
                         self.camera_target_offset = self.camera_offset
             elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                 self.drag_start = None
-                if self.boss_deployment_active:
+                if self.boss_deployment_active or self.war_deployment_active:
+                    self._handle_click(event.pos)
+                elif (
+                    self.screen == "game"
+                    and self.active_level == 2
+                    and not self.campaign_battle_active
+                    and self.shop_menu is None
+                    and self.diplomacy_panel_rect.collidepoint(event.pos)
+                ):
+                    self._handle_click(event.pos)
+                elif (
+                    self.screen == "game"
+                    and self.active_level == 2
+                    and (
+                        self.diplomacy_reply_text is not None
+                        or self.war_march_path is not None
+                    )
+                ):
                     self._handle_click(event.pos)
                 elif (
                     self.screen == "game"
@@ -790,19 +1031,34 @@ class ChessApp:
             self._toggle_fullscreen()
             return
 
+        if self.screen in ("opening_win", "opening_loss", "opening_draw"):
+            self._advance_opening_transition(force=True)
+            return
+
         if self.boss_deployment_active:
             if key == pygame.K_ESCAPE:
                 self._cancel_boss_deployment()
             return
+        if self.war_deployment_active:
+            if key == pygame.K_ESCAPE:
+                self._cancel_war_deployment()
+            return
 
         if self.screen == "pause":
             if key in (pygame.K_ESCAPE, pygame.K_RETURN, pygame.K_SPACE):
-                self.screen = "game"
+                self._resume_from_pause()
             return
 
         if self.screen == "war_victory":
             if key in (pygame.K_ESCAPE, pygame.K_RETURN, pygame.K_SPACE):
-                self.screen = "menu"
+                if self.war_victory_is_final_battle and not self.war_victory_won:
+                    self.screen = "game"
+                    self._begin_final_battle_deployment()
+                elif self.war_victory_is_final_battle:
+                    self.screen = "menu"
+                else:
+                    self.screen = "game"
+                    self._schedule_bot_turn()
             return
         if self.screen == "achievements":
             if key in (pygame.K_l, pygame.K_ESCAPE):
@@ -831,6 +1087,13 @@ class ChessApp:
             if key == pygame.K_ESCAPE:
                 self.screen = "menu"
             return
+        if (
+            self.diplomacy_reply_text is not None
+            or self.war_march_path is not None
+        ):
+            if key == pygame.K_ESCAPE and self.active_level == 2:
+                self.screen = "pause"
+            return
 
         if (
             self.active_level == 2
@@ -849,6 +1112,9 @@ class ChessApp:
                 return
 
         if key == pygame.K_ESCAPE:
+            if self.active_level == 2 and not self.campaign_battle_active:
+                self.screen = "pause"
+                return
             if self.shop_menu is not None:
                 self.shop_menu = None
                 self.shop_confirmation = None
@@ -873,6 +1139,9 @@ class ChessApp:
                 self.status = self.game.status()
                 self.last_action_was_bot = False
                 self._clear_selection()
+                if self.active_level == 1:
+                    self.opening_position_counts.clear()
+                    self.opening_position_counts[self._opening_position_key()] = 1
         elif self._bot_is_thinking():
             return
         elif self.pending_promotion:
@@ -904,35 +1173,145 @@ class ChessApp:
         )
         self.fullscreen = True
 
+    def _handle_pause_click(self, position: tuple[int, int]) -> None:
+        pause_controls = (
+            *self.pause_level_buttons.values(),
+            self.pause_tutorial_button,
+            self.pause_language_button,
+            self.pause_hardcore_button,
+            self.pause_resume_button,
+            self.pause_menu_button,
+            self.pause_music_slider.inflate(0, 20),
+            self.pause_sfx_slider.inflate(0, 20),
+        )
+        if any(rect.collidepoint(position) for rect in pause_controls):
+            self._play_menu_sfx()
+
+        selected_level = next(
+            (
+                level
+                for level, rect in self.pause_level_buttons.items()
+                if rect.collidepoint(position)
+            ),
+            None,
+        )
+        if selected_level is not None:
+            self.selected_level = selected_level
+        elif self.pause_tutorial_button.collidepoint(position):
+            self._toggle_tutorials()
+        elif self.pause_language_button.collidepoint(position):
+            self._toggle_language()
+        elif self.pause_hardcore_button.collidepoint(position):
+            self._toggle_hardcore(from_pause=True)
+        elif self.pause_resume_button.collidepoint(position):
+            self._resume_from_pause()
+        elif self.pause_menu_button.collidepoint(position):
+            self.screen = "menu"
+        else:
+            for name, slider in (
+                ("music", self.pause_music_slider),
+                ("sfx", self.pause_sfx_slider),
+            ):
+                if slider.inflate(0, 20).collidepoint(position):
+                    self.pause_slider_drag = name
+                    self._set_audio_volume_from_position(name, position)
+                    return
+
+    def _resume_from_pause(self) -> None:
+        if self.selected_level != self.active_level:
+            self._start_new_game(reset_campaign=False, abandon_current=True)
+        self.screen = (
+            "death"
+            if self.active_level == 2 and self.campaign.king_dead
+            else "game"
+        )
+        if (
+            self.screen == "game"
+            and self.active_level == 2
+            and self.campaign.final_battle_pending
+            and not self.campaign.final_battle_complete
+        ):
+            self._begin_final_battle_deployment()
+
     def _handle_click(self, position: tuple[int, int]) -> None:
+        if self.screen in ("opening_win", "opening_loss", "opening_draw"):
+            self._advance_opening_transition(force=True)
+            return
+        if self.war_deployment_active:
+            self._handle_war_deployment_click(position)
+            return
         if self.boss_deployment_active and self.screen != "menu":
             self._handle_boss_deployment_click(position)
             return
-        if self.screen == "pause":
-            if any(
-                rect.collidepoint(position)
-                for rect in (
-                    self.pause_resume_button,
-                    self.pause_menu_button,
-                    self.pause_music_slider.inflate(0, 20),
-                    self.pause_sfx_slider.inflate(0, 20),
-                )
-            ):
-                self._play_menu_sfx()
-            if self.pause_resume_button.collidepoint(position):
-                self.screen = "game"
-            elif self.pause_menu_button.collidepoint(position):
-                self.screen = "menu"
-            else:
-                for name, slider in (
-                    ("music", self.pause_music_slider),
-                    ("sfx", self.pause_sfx_slider),
+        if (
+            self.screen == "game"
+            and self.active_level == 2
+            and not self.campaign_battle_active
+            and self.shop_menu is None
+            and self.diplomacy_panel_rect.collidepoint(position)
+        ):
+            choice = next(
+                (
+                    index
+                    for index, rect in enumerate(self.diplomacy_choice_buttons)
+                    if rect.collidepoint(position)
+                ),
+                None,
+            )
+            if choice is not None:
+                if (
+                    self.campaign.rival_war_won
+                    or self.diplomacy_reply_text is not None
                 ):
-                    if slider.inflate(0, 20).collidepoint(position):
-                        self.pause_slider_drag = name
-                        self._set_audio_volume_from_position(name, position)
+                    return
+                if self.campaign.rival_war_declared:
+                    if (
+                        self.campaign.rival_battle_wins >= 3
+                        or self.campaign.final_battle_countdown is not None
+                    ):
+                        self.status = "Poslední bitva se blíží."
                         return
+                    if choice == 0:
+                        self._begin_war_march()
+                    return
+                _, reply = self.campaign.begin_diplomacy(choice)
+                self.diplomacy_reply_text = reply
+                self.diplomacy_reply_elapsed_ms = 0.0
+                self.diplomacy_reply_duration_ms = min(
+                    DIPLOMACY_REPLY_MAX_MS,
+                    max(
+                        DIPLOMACY_REPLY_MIN_MS,
+                        2500 + len(reply) * 18,
+                    ),
+                )
+                self._mark_campaign_dirty()
+                self._play_menu_sfx()
             return
+        if (
+            self.screen == "game"
+            and (
+                self.diplomacy_reply_text is not None
+                or self.war_march_path is not None
+            )
+        ):
+            return
+        if self.screen == "pause":
+            self._handle_pause_click(position)
+            return
+        if self.screen == "game" and self.active_level == 1:
+            if self.opening_debug_button.collidepoint(position):
+                self.opening_debug_visible = not self.opening_debug_visible
+                return
+            if self.opening_debug_visible:
+                debug_outcomes = {
+                    "white": "win",
+                    "black": "loss",
+                    "draw": "draw",
+                }
+                for option, button in self.opening_debug_buttons.items():
+                    if button.collidepoint(position):
+                        self._finish_opening_match(debug_outcomes[option])
+                        return
         if self.screen == "death":
             if (
                 not self.hardcore_enabled
@@ -1188,14 +1567,13 @@ class ChessApp:
         return BLACK if square[0] < self.game.board_size // 2 else WHITE
 
     def _board_layout(self) -> tuple[int, tuple[float, float]]:
-        if self.active_level == 2:
+        if self.active_level == 2 and not self.campaign_battle_active:
             square_size = max(24, round(32 * self.zoom))
             board_width = self.game.board_size * square_size
             board_height = self.game.board_size * square_size
-            view_top = 68
-            view_height = WINDOW_SIZE[1] - view_top
-            base_x = max(0, (WINDOW_SIZE[0] - board_width) // 2)
-            base_y = view_top + max(0, (view_height - board_height) // 2)
+            viewport = self._campaign_map_viewport()
+            base_x = viewport.x + max(0, (viewport.width - board_width) // 2)
+            base_y = viewport.y + max(0, (viewport.height - board_height) // 2)
             return square_size, (
                 base_x + self.camera_offset[0],
                 base_y + self.camera_offset[1],
@@ -1211,6 +1589,15 @@ class ChessApp:
         ) // 2
         return square_size, (BOARD_LEFT + board_offset, BOARD_TOP + board_offset)
 
+    @staticmethod
+    def _campaign_map_viewport() -> pygame.Rect:
+        return pygame.Rect(
+            CAMPAIGN_MAP_VIEWPORT_LEFT,
+            68,
+            WINDOW_SIZE[0] - CAMPAIGN_MAP_VIEWPORT_LEFT,
+            WINDOW_SIZE[1] - 68,
+        )
+
     def _clamp_camera_offset(self) -> None:
         self.camera_offset = self._clamped_camera_offset(
             self.camera_offset, keep_king_visible=False
@@ -1222,37 +1609,36 @@ class ChessApp:
         *,
         keep_king_visible: bool = True,
     ) -> tuple[float, float]:
-        if self.active_level != 2:
+        if self.active_level != 2 or self.campaign_battle_active:
             return (0, 0)
         square_size = max(24, round(32 * self.zoom))
         board_width = self.game.board_size * square_size
         board_height = board_width
-        view_top = 68
-        view_height = WINDOW_SIZE[1] - view_top
-        base_x = max(0, (WINDOW_SIZE[0] - board_width) // 2)
-        base_y = view_top + max(0, (view_height - board_height) // 2)
-        min_x = min(0, WINDOW_SIZE[0] - board_width) - base_x
-        max_x = max(0, WINDOW_SIZE[0] - board_width) - base_x
-        min_y = min(0, view_height - board_height) - (base_y - view_top)
-        max_y = max(0, view_height - board_height) - (base_y - view_top)
+        viewport = self._campaign_map_viewport()
+        base_x = viewport.x + max(0, (viewport.width - board_width) // 2)
+        base_y = viewport.y + max(0, (viewport.height - board_height) // 2)
+        min_x = min(0, viewport.width - board_width) - (base_x - viewport.x)
+        max_x = max(0, viewport.width - board_width) - (base_x - viewport.x)
+        min_y = min(0, viewport.height - board_height) - (base_y - viewport.y)
+        max_y = max(0, viewport.height - board_height) - (base_y - viewport.y)
         king_square = self._king_square(WHITE)
         if keep_king_visible and self.zoom > 1.0 and king_square is not None:
             king_row, king_col = king_square
             min_x = max(
-                -base_x - board_width + square_size,
-                -base_x - king_col * square_size,
+                viewport.x - base_x - board_width + square_size,
+                viewport.x - base_x - king_col * square_size,
             )
             max_x = min(
-                WINDOW_SIZE[0] - base_x - square_size,
-                WINDOW_SIZE[0] - base_x - (king_col + 1) * square_size,
+                viewport.right - base_x - square_size,
+                viewport.right - base_x - (king_col + 1) * square_size,
             )
             min_y = max(
-                view_top - base_y - board_height + square_size,
-                view_top - base_y - king_row * square_size,
+                viewport.y - base_y - board_height + square_size,
+                viewport.y - base_y - king_row * square_size,
             )
             max_y = min(
-                view_top + view_height - base_y - (king_row + 1) * square_size,
-                view_top + view_height - base_y - square_size,
+                viewport.bottom - base_y - (king_row + 1) * square_size,
+                viewport.bottom - base_y - square_size,
             )
         return (
             min(max_x, max(min_x, offset[0])),
@@ -1260,7 +1646,11 @@ class ChessApp:
         )
 
     def _follow_king_camera(self) -> None:
-        if self.active_level != 2 or self.zoom <= 1.0:
+        if (
+            self.active_level != 2
+            or self.campaign_battle_active
+            or self.zoom <= 1.0
+        ):
             self.camera_target_offset = self._clamped_camera_offset((0, 0))
             return
         king_square = self._king_square(WHITE)
@@ -1272,14 +1662,13 @@ class ChessApp:
 
         square_size = max(24, round(32 * self.zoom))
         board_width = self.game.board_size * square_size
-        view_top = 68
-        view_height = WINDOW_SIZE[1] - view_top
-        base_x = max(0, (WINDOW_SIZE[0] - board_width) // 2)
-        base_y = view_top + max(0, (view_height - board_width) // 2)
+        viewport = self._campaign_map_viewport()
+        base_x = viewport.x + max(0, (viewport.width - board_width) // 2)
+        base_y = viewport.y + max(0, (viewport.height - board_width) // 2)
         row, col = king_square
         target = (
-            WINDOW_SIZE[0] // 2 - base_x - (col * square_size + square_size // 2),
-            view_top + view_height // 2 - base_y - (row * square_size + square_size // 2),
+            viewport.centerx - base_x - (col * square_size + square_size // 2),
+            viewport.centery - base_y - (row * square_size + square_size // 2),
         )
         self.camera_target_offset = self._clamped_camera_offset(target)
 
@@ -1307,7 +1696,9 @@ class ChessApp:
         self, position: tuple[int, int]
     ) -> tuple[int, int] | None:
         viewport = (
-            pygame.Rect((0, 0), WINDOW_SIZE)
+            self._campaign_map_viewport()
+            if self.active_level == 2 and not self.campaign_battle_active
+            else pygame.Rect((0, 0), WINDOW_SIZE)
             if self.active_level == 2
             else pygame.Rect(
                 BOARD_LEFT, BOARD_TOP, BOARD_VIEW_PIXELS, BOARD_VIEW_PIXELS
@@ -1354,6 +1745,13 @@ class ChessApp:
             if self.active_level == 2 and self.campaign.king_dead
             else "game"
         )
+        if (
+            self.screen == "game"
+            and self.active_level == 2
+            and self.campaign.final_battle_pending
+            and not self.campaign.final_battle_complete
+        ):
+            self._begin_final_battle_deployment()
 
     def _retry_after_death(self) -> None:
         if self.hardcore_enabled:
@@ -1364,13 +1762,20 @@ class ChessApp:
         self._start_new_game(reset_campaign=False)
         self._mark_campaign_dirty()
         self.screen = "game"
+        if self.campaign.final_battle_pending:
+            self._begin_final_battle_deployment()
 
     def _start_new_game(
         self, *, reset_campaign: bool = True, abandon_current: bool = False
     ) -> None:
         if (
             not abandon_current
-            and (self.campaign_battle_active or self.boss_deployment_active)
+            and (
+                self.campaign_battle_active
+                or self.boss_deployment_active
+                or self.war_deployment_active
+                or self.war_march_path is not None
+            )
         ):
             self.status = "Bitvu nelze prerusit resetem."
             return
@@ -1378,17 +1783,8 @@ class ChessApp:
         self.active_level = self.selected_level
         self.campaign_intro_zoom_started_at = None
         if self.active_level == 2 and reset_campaign:
-            previous_campaign = self.campaign
-            self.campaign = Campaign(
-                raiders_defeated_total=previous_campaign.raiders_defeated_total,
-                king_potion_heals=previous_campaign.king_potion_heals,
-                unlocked_achievements=list(
-                    previous_campaign.unlocked_achievements
-                ),
-                visited_campaign_squares=list(
-                    previous_campaign.visited_campaign_squares
-                ),
-            )
+            self.campaign = Campaign()
+            self.achievement_notifications.clear()
         self.game = self._create_level_game(self.active_level)
         if self.active_level == 2:
             self._record_campaign_square(self._king_square(WHITE))
@@ -1401,7 +1797,22 @@ class ChessApp:
         self.campaign_battle_active = False
         self.boss_battle_active = False
         self.war_victory_started_at = None
+        self.war_victory_is_final_battle = False
+        self.war_victory_won = False
+        self.final_battle_active = False
+        self.opening_transition_outcome = None
+        self.opening_transition_started_at = None
+        self.opening_position_counts.clear()
+        self.opening_debug_visible = False
         self.boss_deployment_active = False
+        self.war_deployment_active = False
+        self.war_march_path = None
+        self.war_march_king = None
+        self.diplomacy_reply_text = None
+        self.diplomacy_reply_elapsed_ms = 0.0
+        self.diplomacy_reply_duration_ms = 0
+        self.war_march_elapsed_ms = 0.0
+        self.war_deployment_limit = 0
         self.boss_deployment = {kind: 0 for kind in ARMY_KINDS}
         self.boss_deployed_army = {}
         self.deployed_armies = {}
@@ -1417,6 +1828,8 @@ class ChessApp:
         self.last_action_was_bot = False
         self.banter_started_at = pygame.time.get_ticks()
         self._clear_selection()
+        if self.active_level == 1:
+            self.opening_position_counts[self._opening_position_key()] = 1
         if self.active_level == 1:
             self._show_tutorial(
                 "classic.start",
@@ -1468,6 +1881,8 @@ class ChessApp:
         team_health_before = self.game.team_health.copy()
         raiders_defeated = 0
         if self.game.play(move):
+            if self.active_level == 1 and self._track_opening_position():
+                return
             if (
                 realtime_campaign
                 and moving_piece is not None
@@ -1660,12 +2075,32 @@ class ChessApp:
         return False
 
     def _start_campaign_battle(self) -> None:
-        player_army = self.campaign.select_army(WHITE, self.deployment_limit)
-        rival_army = self.campaign.select_army(BLACK, self.deployment_limit)
+        self._start_campaign_battle_with_army()
+
+    def _start_campaign_battle_with_army(
+        self, selected_player_army: dict[str, int] | None = None
+    ) -> None:
+        final_battle = self.campaign.final_battle_pending
+        player_army = (
+            self.campaign.select_army(WHITE, self.deployment_limit)
+            if selected_player_army is None
+            else selected_player_army.copy()
+        )
+        if final_battle:
+            rival_army = {"P": 0, "N": 2, "B": 2, "R": 2, "Q": 1}
+        else:
+            battle_limit = (
+                self.deployment_limit
+                if selected_player_army is None
+                else max(1, sum(player_army.values()))
+            )
+            rival_army = self.campaign.select_army(BLACK, battle_limit)
         if not any(player_army.values()) or not any(rival_army.values()):
             self.status = "Oba kralovstvi potrebuji bojove jednotky."
             return
 
+        if not final_battle:
+            self.campaign.rival_war_declared = True
         self.kingdom_game = self.game
         self.piece_move_animation = None
         self.deployed_armies = {WHITE: player_army, BLACK: rival_army}
@@ -1676,15 +2111,185 @@ class ChessApp:
         battle.configure_battle(self.deployed_armies)
         self.game = battle
         self.campaign_battle_active = True
+        self.war_deployment_active = False
+        self.war_deployment_limit = 0
         self.boss_battle_active = False
-        self.status = "Bitva 8 x 8 zacala. Poraz souperova krale."
-        self._show_tutorial(
-            "campaign.war",
-            "Vstoupil jsi do valky. Poraz kralem cerneho krale; prezivsi "
-            "armada se vrati do mesta.",
+        self.final_battle_active = final_battle
+        self.status = (
+            "Poslední bitva 8 x 8. Poraz černého krále doopravdy."
+            if final_battle
+            else "Bitva 8 x 8 zacala. Poraz souperova krale."
         )
+        if not final_battle:
+            self._show_tutorial(
+                "campaign.war",
+                "Vstoupil jsi do valky. Poraz kralem cerneho krale; prezivsi "
+                "armada se vrati do mesta.",
+            )
         self.zoom = 1.0
         self._clear_selection()
+
+    def _begin_war_march(self) -> None:
+        if (
+            self.war_march_path is not None
+            or self.war_deployment_active
+            or self.campaign.rival_war_won
+            or self.campaign.rival_battle_wins >= 3
+            or self.campaign.final_battle_countdown is not None
+            or self.campaign.final_battle_pending
+        ):
+            return
+        king_square = self._king_square(WHITE)
+        king = (
+            None
+            if king_square is None
+            else self.game.board[king_square[0]][king_square[1]]
+        )
+        armory_gate = next(
+            (
+                square
+                for square, kind in self.game.shop_tiles.items()
+                if kind == "armory" and square[0] >= self.game.board_size // 2
+            ),
+            None,
+        )
+        if king_square is None or king is None or armory_gate is None:
+            self.status = "Krále nebo vstup do zbrojnice se nepodařilo najít."
+            return
+
+        blocked = (
+            set(self.game.building_tiles)
+            | set(self.game.loot)
+            | self.game.loot_reserved_squares
+            | set(self.campaign.potions)
+        )
+        blocked.update(
+            (row, col)
+            for row, board_row in enumerate(self.game.board)
+            for col, piece in enumerate(board_row)
+            if piece is not None and (row, col) != king_square
+        )
+        blocked.update(
+            (int(raider.row), int(raider.col))
+            for raider in self.campaign.raiders
+        )
+        blocked.update(
+            square for square in self.game.shop_tiles if square != armory_gate
+        )
+        previous: dict[tuple[int, int], tuple[int, int] | None] = {
+            king_square: None
+        }
+        frontier = deque([king_square])
+        while frontier and armory_gate not in previous:
+            row, col = frontier.popleft()
+            for next_square in (
+                (row - 1, col),
+                (row + 1, col),
+                (row, col - 1),
+                (row, col + 1),
+            ):
+                next_row, next_col = next_square
+                if (
+                    not self.game._inside(next_row, next_col)
+                    or next_square in blocked
+                    or next_square in previous
+                ):
+                    continue
+                previous[next_square] = (row, col)
+                frontier.append(next_square)
+        if armory_gate not in previous:
+            self.status = "Cesta do zbrojnice je zablokovaná."
+            return
+
+        path = [armory_gate]
+        while path[-1] != king_square:
+            parent = previous[path[-1]]
+            if parent is None:
+                self.status = "Cestu do zbrojnice se nepodařilo sestavit."
+                return
+            path.append(parent)
+        path.reverse()
+        self._cancel_bot_turn()
+        self.shop_menu = None
+        self.shop_confirmation = None
+        self._clear_selection()
+        self.piece_move_animation = None
+        self.war_march_path = path
+        self.war_march_king = king
+        self.war_march_elapsed_ms = 0.0
+        self.status = "Král vyráží do zbrojnice."
+        self._play_menu_sfx()
+
+    def _begin_war_deployment(self) -> None:
+        if self.campaign.player.army_size == 0:
+            self.campaign.player.city = True
+            self.campaign.player.armory = True
+            self.campaign.player.army["P"] = 3
+            self._mark_campaign_dirty()
+            self.status = "Město povolalo tři pěšáky do obrany."
+        else:
+            self.status = "Vyber jednotky z městské armády pro závěrečnou bitvu."
+        self.boss_deployment = {kind: 0 for kind in ARMY_KINDS}
+        self.war_deployment_limit = min(
+            WAR_DEPLOYMENT_LIMIT, self.campaign.player.army_size
+        )
+        self.war_deployment_active = True
+        self._cancel_bot_turn()
+
+    def _begin_final_battle_deployment(self) -> None:
+        if (
+            not self.campaign.final_battle_pending
+            or self.campaign.final_battle_complete
+            or self.campaign_battle_active
+        ):
+            return
+        if self.campaign.player.army_size == 0:
+            self.campaign.player.city = True
+            self.campaign.player.armory = True
+            self.campaign.player.army["P"] = 3
+            self._mark_campaign_dirty()
+        self.boss_deployment = {kind: 0 for kind in ARMY_KINDS}
+        self.war_deployment_limit = min(
+            WAR_DEPLOYMENT_LIMIT, self.campaign.player.army_size
+        )
+        self.war_deployment_active = True
+        self.status = "Připrav se na poslední bitvu. Vyber své figurky."
+        self._cancel_bot_turn()
+
+    def _handle_war_deployment_click(self, position: tuple[int, int]) -> None:
+        if self.boss_cancel_button.collidepoint(position):
+            self._cancel_war_deployment()
+            return
+        for kind, buttons in self.boss_deployment_buttons.items():
+            if buttons["minus"].collidepoint(position):
+                self.boss_deployment[kind] = max(
+                    0, self.boss_deployment[kind] - 1
+                )
+                return
+            if buttons["plus"].collidepoint(position):
+                selected = sum(self.boss_deployment.values())
+                if (
+                    selected < self.war_deployment_limit
+                    and self.boss_deployment[kind]
+                    < self.campaign.player.army[kind]
+                ):
+                    self.boss_deployment[kind] += 1
+                return
+        if self.boss_start_button.collidepoint(position):
+            if sum(self.boss_deployment.values()) == 0:
+                self.status = "Vyber alespoň jednu jednotku."
+                return
+            self._start_campaign_battle_with_army(self.boss_deployment)
+
+    def _cancel_war_deployment(self) -> None:
+        if self.campaign.final_battle_pending:
+            self.status = "Poslední bitvu už nelze odložit."
+            return
+        self.war_deployment_active = False
+        self.boss_deployment = {kind: 0 for kind in ARMY_KINDS}
+        self.war_deployment_limit = 0
+        self.status = "Armáda čeká u zbrojnice; výběr můžeš otevřít znovu."
+        self._schedule_bot_turn()
 
     def _boss_chest_tiles(self) -> set[tuple[int, int]]:
         if (
@@ -1790,6 +2395,7 @@ class ChessApp:
             self._resolve_boss_battle()
             return
 
+        final_battle = self.final_battle_active
         survivors = {WHITE: {}, BLACK: {}}
         for color in (WHITE, BLACK):
             survivors[color] = {kind: 0 for kind in ARMY_KINDS}
@@ -1803,11 +2409,49 @@ class ChessApp:
         self.campaign.player.coins += self.game.coins[WHITE]
         if winner == WHITE:
             self.campaign.faction(winner).coins += 250
+            if final_battle:
+                self.campaign.final_battle_pending = False
+                self.campaign.final_battle_countdown = None
+                self.campaign.final_battle_complete = True
+                self.campaign.rival_war_won = True
+            else:
+                self.campaign.rival_battle_wins = min(
+                    3, self.campaign.rival_battle_wins + 1
+                )
+                if self.campaign.rival_battle_wins >= 3:
+                    self.campaign.final_battle_countdown = (
+                        FINAL_BATTLE_COUNTDOWN_SECONDS
+                    )
+                else:
+                    rival = self.campaign.rival
+                    rival.city = True
+                    rival.armory = True
+                    for kind in (
+                        ("R",)
+                        if self.campaign.rival_battle_wins == 1
+                        else ("R", "Q")
+                    ):
+                        if rival.army_size < ARMY_LIMIT:
+                            rival.army[kind] += 1
         if winner in (WHITE, BLACK):
             result = "Vitezstvi" if winner == WHITE else "Porazka"
-            self.status = f"{result}. Prezivsi jednotky se vraci do kralovstvi."
+            if final_battle and winner == WHITE:
+                self.status = "Vyhráli jste finální bitvu. Království je vaše!"
+            elif final_battle:
+                self.status = "Černý král vyhrál. Připrav armádu a zkus to znovu."
+            elif winner == WHITE and self.campaign.rival_war_declared:
+                self.status = (
+                    f"Vyhráli jste bitvu "
+                    f"{self.campaign.rival_battle_wins}/3. Tohle není naposledy."
+                )
+            else:
+                self.status = f"{result}. Prezivsi jednotky se vraci do kralovstvi."
         else:
-            self.status = "Bitva skoncila. Prezivsi jednotky se vraci domů."
+            self.status = (
+                "Bitva skoncila. Prezivsi jednotky se vraci domů."
+                if not final_battle
+                else "Finální bitva skončila remízou. Zkus to znovu."
+            )
 
         self._mark_campaign_dirty()
         battle_result = self.status
@@ -1816,13 +2460,18 @@ class ChessApp:
         self.kingdom_game = None
         self.piece_move_animation = None
         self.campaign_battle_active = False
+        self.war_deployment_active = False
+        self.war_deployment_limit = 0
+        self.final_battle_active = False
         self.deployed_armies = {}
         self.game.turn = WHITE
         self._clear_selection()
         self.status = battle_result
-        if winner == WHITE:
+        if winner == WHITE or final_battle:
             self.screen = "war_victory"
             self.war_victory_started_at = pygame.time.get_ticks()
+            self.war_victory_is_final_battle = final_battle
+            self.war_victory_won = winner == WHITE
         self._flush_campaign_save(force=True)
 
     def _resolve_boss_battle(self) -> None:
@@ -1950,25 +2599,29 @@ class ChessApp:
         pygame.display.set_caption(translate("Šachy — základ", self.language))
         self._rendered_text_cache.clear()
 
-    def _toggle_hardcore(self) -> None:
+    def _toggle_hardcore(self, *, from_pause: bool = False) -> None:
         disabling = self.hardcore_enabled
         self.hardcore_enabled = not self.hardcore_enabled
         save_hardcore_enabled(self.hardcore_enabled)
         if not disabling:
             return
 
+        return_screen = "pause" if from_pause else "menu"
         self._cancel_bot_turn()
         self.campaign_battle_active = False
         self.boss_battle_active = False
         self.boss_deployment_active = False
+        self.war_deployment_active = False
+        self.war_march_path = None
+        self.war_march_king = None
         self.kingdom_game = None
         self.selected_level = 2
         self.tutorial_seen.clear()
         self.tutorial_queue.clear()
         self.tutorial_active = None
         self.tutorial_until = 0
-        self._start_new_game(reset_campaign=True)
-        self.screen = "menu"
+        self._start_new_game(reset_campaign=True, abandon_current=from_pause)
+        self.screen = return_screen
 
     def _advance_campaign_action(self, color: str) -> None:
         self.campaign.advance_day(color)
@@ -2559,8 +3212,22 @@ class ChessApp:
         self.bot_due_at = pygame.time.get_ticks() + random.randint(120, 260)
         self.status = "Souper na tahu..."
 
+    def _current_bot_difficulty(self) -> str:
+        if not self.campaign_battle_active:
+            return self.bot_difficulty
+        levels = ("easy", "medium", "hard")
+        if self.final_battle_active:
+            return "hard"
+        base_level = levels.index(self.bot_difficulty)
+        progression = min(2, self.campaign.rival_battle_wins)
+        return levels[min(len(levels) - 1, base_level + progression)]
+
     def _update_bot_turn(self) -> None:
-        if self.screen == "pause":
+        if self.screen != "game" or (
+            self.active_level == 2
+            and self.shop_menu is not None
+            and not self.campaign_battle_active
+        ):
             return
         realtime_campaign = self._is_realtime_campaign()
         if self.bot_due_at is not None:
@@ -2571,7 +3238,7 @@ class ChessApp:
             if realtime_campaign:
                 game_snapshot.turn = BLACK
             self.bot_future = self.bot_executor.submit(
-                choose_move, game_snapshot, self.bot_difficulty
+                choose_move, game_snapshot, self._current_bot_difficulty()
             )
 
         if self.bot_future is None or not self.bot_future.done():
@@ -2642,6 +3309,8 @@ class ChessApp:
                 self._schedule_bot_turn()
                 return
 
+        if self.active_level == 1 and self._track_opening_position():
+            return
         if moving_piece is not None:
             self.piece_move_animation = (
                 moving_piece,
@@ -2666,15 +3335,17 @@ class ChessApp:
             self._resolve_campaign_battle()
 
     def _sync_campaign_progress(self) -> None:
-        if (
-            self.active_level == 1
-            and self.game.winner() == WHITE
-        ):
-            self._cancel_bot_turn()
-            self.unlocked_level = max(self.unlocked_level, 2)
-            save_unlocked_level(self.unlocked_level)
-            self.selected_level = 2
-            self._start_new_game(reset_campaign=False)
+        if self.active_level == 1 and self.screen == "game":
+            winner = self.game.winner()
+            if winner is not None:
+                outcome = (
+                    "draw"
+                    if winner == "draw"
+                    else "win"
+                    if winner == WHITE
+                    else "loss"
+                )
+                self._finish_opening_match(outcome)
 
     def _advance_campaign_intro_zoom(self) -> None:
         if self.campaign_intro_zoom_started_at is None:
@@ -2951,6 +3622,9 @@ class ChessApp:
             self._draw_death_screen()
             self._draw_king_banter()
             return
+        if self.screen in ("opening_win", "opening_loss", "opening_draw"):
+            self._draw_opening_result(now)
+            return
         if self.screen == "war_victory":
             self._draw_war_victory(now)
             return
@@ -2959,12 +3633,17 @@ class ChessApp:
             self._draw_boss_deployment()
             self._draw_king_banter()
             return
+        if self.war_deployment_active:
+            self._draw_war_deployment()
+            return
 
         if self.shop_menu is not None and self.active_level == 2 and not self.campaign_battle_active:
             self.surface.fill((24, 31, 29))
             self._draw_shop_screen()
             self._draw_tutorial()
             self._draw_king_banter()
+            if self.screen == "pause":
+                self._draw_pause_menu()
             return
 
         if (
@@ -2993,7 +3672,9 @@ class ChessApp:
             boss_chest_tiles=self._boss_chest_tiles(),
             piece_animation=self.piece_move_animation,
             viewport_rect=(
-                pygame.Rect((0, 0), WINDOW_SIZE)
+                self._campaign_map_viewport()
+                if self.active_level == 2 and not self.campaign_battle_active
+                else pygame.Rect((0, 0), WINDOW_SIZE)
                 if self.active_level == 2
                 else None
             ),
@@ -3015,20 +3696,244 @@ class ChessApp:
                 else None
             ),
             language=self.language,
+            king_health_ratio=(
+                self._animated_health(
+                    self.team_health_animations.get(WHITE),
+                    self.game.team_health[WHITE],
+                    now,
+                )
+                / max(1, self.game.team_health_max[WHITE])
+                if self.active_level == 2 and not self.campaign_battle_active
+                else None
+            ),
+            hidden_piece_square=(
+                self.war_march_path[0]
+                if self.war_march_path is not None
+                else None
+            ),
         )
+        self._draw_war_march()
         self._sync_campaign_progress()
         if self.active_level == 2:
             self._draw_campaign_hud()
         else:
             self._draw_sidebar()
+            if self.active_level == 1 and not self.campaign_battle_active:
+                self._draw_opening_debug_panel()
         if self.screen != "pause":
             self._draw_tutorial()
         if self.pending_promotion:
             self._draw_promotion_prompt()
+        if self.screen != "pause":
+            self._draw_king_banter()
+        if (
+            self.active_level == 2
+            and not self.campaign_battle_active
+            and self.shop_menu is None
+        ):
+            self._draw_diplomacy_chat()
         if self.screen == "pause":
             self._draw_pause_menu()
-        else:
-            self._draw_king_banter()
+
+    def _draw_diplomacy_chat(self) -> None:
+        self.surface.blit(self.diplomacy_panel_surface, self.diplomacy_panel_rect)
+        self._center_text(
+            "Diplomacie",
+            self.small_font,
+            (255, 232, 177),
+            (self.diplomacy_panel_rect.centerx, 99),
+        )
+        trust = self.campaign.diplomacy_trust
+        trust_label = (
+            "Válka vyhrána"
+            if self.campaign.rival_war_won
+            else "Válka vyhlášena"
+            if self.campaign.rival_war_declared
+            else f"Důvěra: {trust:+d}/10"
+        )
+        trust_color = (
+            (232, 112, 91)
+            if self.campaign.rival_war_declared or trust < 0
+            else (153, 209, 147)
+        )
+        self._center_text(
+            trust_label,
+            self.diplomacy_font,
+            trust_color,
+            (self.diplomacy_panel_rect.centerx, 122),
+        )
+        meter = pygame.Rect(20, 135, 196, 5)
+        pygame.draw.rect(self.surface, (59, 67, 61), meter, border_radius=3)
+        meter_fill = meter.copy()
+        meter_fill.width = round(meter.width * (trust + 10) / 20)
+        if meter_fill.width:
+            pygame.draw.rect(
+                self.surface,
+                (195, 94, 77) if trust < 0 else (115, 174, 112),
+                meter_fill,
+                border_radius=3,
+            )
+
+        messages = self.campaign.diplomacy_history[-2:]
+        if self.diplomacy_reply_text is not None:
+            progress = min(
+                1.0,
+                self.diplomacy_reply_elapsed_ms
+                / max(1, self.diplomacy_reply_duration_ms),
+            )
+            character_count = round(len(self.diplomacy_reply_text) * progress)
+            typed_reply = self.diplomacy_reply_text[:character_count]
+            if pygame.time.get_ticks() // 350 % 2 == 0:
+                typed_reply += "|"
+            messages = [
+                *self.campaign.diplomacy_history[-1:],
+                ("king", typed_reply),
+            ]
+        if not messages:
+            messages = [
+                (
+                    "king",
+                    "Cizí králi, co mi nabízíš? Mír, obchod, nebo další hrozby?",
+                )
+            ]
+        cursor_y = 358
+        for speaker, message in reversed(messages):
+            lines = self._wrap_diplomacy_text(
+                translate(message, self.language), self.diplomacy_font, 190
+            )
+            message_height = 15 + len(lines) * 15 + 4
+            cursor_y -= message_height
+            speaker_label = "Ty" if speaker == "player" else "Král"
+            speaker_color = (
+                (163, 199, 233)
+                if speaker == "player"
+                else (255, 216, 139)
+            )
+            self._text(
+                speaker_label,
+                self.diplomacy_bold_font,
+                speaker_color,
+                (18, cursor_y),
+            )
+            for line_index, line in enumerate(lines):
+                self._text(
+                    line,
+                    self.diplomacy_font,
+                    (231, 234, 224),
+                    (18, cursor_y + 15 + line_index * 15),
+                )
+
+        self._center_text(
+            "Válka je vyhraná."
+            if self.campaign.rival_war_won
+            else "Jsi ve válce."
+            if self.campaign.rival_war_declared
+            else "Král píše..."
+            if self.diplomacy_reply_text is not None
+            else "Vyber odpověď:",
+            self.diplomacy_font,
+            (205, 212, 201),
+            (self.diplomacy_panel_rect.centerx, 377),
+        )
+        choices = (
+            ("", "", "", "")
+            if self.campaign.rival_war_won
+            else ("Jít do zbrojnice", "", "", "")
+            if self.campaign.rival_war_declared
+            else (
+                "Nabízím mír",
+                "Nabízím obchod",
+                "Žádám o příměří",
+                "Vyhrožuji válkou",
+            )
+        )
+        for label, rect in zip(choices, self.diplomacy_choice_buttons):
+            if not label:
+                continue
+            hovered = rect.collidepoint(pygame.mouse.get_pos())
+            color = (
+                (170, 119, 65)
+                if label == "Vyhrožuji válkou" and hovered
+                else (133, 75, 63)
+                if label == "Vyhrožuji válkou"
+                else (205, 169, 99)
+                if hovered
+                else (75, 91, 82)
+            )
+            if self.diplomacy_reply_text is not None:
+                color = (54, 64, 56)
+            pygame.draw.rect(self.surface, color, rect, border_radius=7)
+            self._center_text(
+                label,
+                self.diplomacy_font,
+                (245, 242, 226),
+                rect.center,
+            )
+
+    def _draw_war_march(self) -> None:
+        path = self.war_march_path
+        king = self.war_march_king
+        if not path or king is None:
+            return
+
+        progress = min(
+            1.0,
+            self.war_march_elapsed_ms / WAR_KING_MARCH_DURATION_MS,
+        )
+        step_position = progress * max(0, len(path) - 1)
+        step_index = min(int(step_position), len(path) - 1)
+        step_progress = step_position - step_index
+        row, col = path[step_index]
+        if step_index + 1 < len(path):
+            next_row, next_col = path[step_index + 1]
+            row += (next_row - row) * step_progress
+            col += (next_col - col) * step_progress
+        square_size, (origin_x, origin_y) = self._board_layout()
+        center = (
+            round(origin_x + (col + 0.5) * square_size),
+            round(origin_y + (row + 0.5) * square_size),
+        )
+        pygame.draw.circle(
+            self.surface,
+            (244, 199, 107),
+            center,
+            max(6, square_size // 2 - 2),
+            width=2,
+        )
+        self.renderer.draw_piece_sprite(
+            self.surface,
+            pygame.Rect(
+                center[0] - square_size // 2 + 2,
+                center[1] - square_size // 2 + 2,
+                square_size - 4,
+                square_size - 4,
+            ),
+            king.kind,
+            king.color,
+        )
+        self._center_text(
+            "Král míří do zbrojnice",
+            self.diplomacy_bold_font,
+            (255, 232, 177),
+            (self._campaign_map_viewport().centerx, 92),
+        )
+
+    @staticmethod
+    def _wrap_diplomacy_text(
+        text: str, font: pygame.font.Font, max_width: int
+    ) -> list[str]:
+        lines: list[str] = []
+        current = ""
+        for word in text.split():
+            candidate = f"{current} {word}".strip()
+            if current and font.size(candidate)[0] > max_width:
+                lines.append(current)
+                current = word
+            else:
+                current = candidate
+        if current:
+            lines.append(current)
+        return lines
 
     def _draw_boss_deployment(self) -> None:
         self.surface.fill((24, 31, 29))
@@ -3131,6 +4036,139 @@ class ChessApp:
             (520, 703),
         )
 
+    def _draw_war_deployment(self) -> None:
+        self.surface.fill((24, 31, 29))
+        self._center_text(
+            "ZÁVĚREČNÁ BITVA" if self.campaign.final_battle_pending else "MOBILIZACE KRÁLOVSTVÍ",
+            self.title_font,
+            (255, 224, 143),
+            (520, 60),
+        )
+        self._center_text(
+            (
+                "Vyber armádu. Černý král nasazuje 2 věže, 2 jezdce, 2 střelce a dámu."
+                if self.campaign.final_battle_pending
+                else "Vyber až 8 figurek ze své městské armády."
+            ),
+            self.small_font,
+            (220, 225, 214),
+            (520, 101),
+        )
+
+        final_battle = self.campaign.final_battle_pending
+        preview_size = 8 if final_battle else 6
+        board_left, board_top = 54, 132
+        tile_size = 44 if final_battle else 56
+        for row in range(preview_size):
+            for col in range(preview_size):
+                rect = pygame.Rect(
+                    board_left + col * tile_size,
+                    board_top + row * tile_size,
+                    tile_size,
+                    tile_size,
+                )
+                color = (110, 133, 112) if (row + col) % 2 else (190, 184, 154)
+                pygame.draw.rect(self.surface, color, rect)
+                pygame.draw.rect(self.surface, (39, 48, 41), rect, width=1)
+        if final_battle:
+            self._draw_preview_piece((1, 4), "K", BLACK, board_left, board_top, tile_size)
+            self._draw_preview_piece((6, 4), "K", WHITE, board_left, board_top, tile_size)
+            black_lineup = (
+                ((2, 0), "R"),
+                ((2, 1), "N"),
+                ((2, 2), "B"),
+                ((2, 3), "Q"),
+                ((2, 5), "B"),
+                ((2, 6), "N"),
+                ((2, 7), "R"),
+            )
+            for square, kind in black_lineup:
+                self._draw_preview_piece(
+                    square, kind, BLACK, board_left, board_top, tile_size
+                )
+        else:
+            self._draw_preview_piece((0, 3), "K", BLACK, board_left, board_top, tile_size)
+            self._draw_preview_piece((5, 3), "K", WHITE, board_left, board_top, tile_size)
+        selected_kinds = [
+            kind
+            for kind in ARMY_KINDS
+            for _ in range(self.boss_deployment[kind])
+        ]
+        for index, kind in enumerate(selected_kinds):
+            row, col = (
+                (5 - index // 4, index % 4)
+                if final_battle
+                else (4 - index // 3, 1 + index % 3)
+            )
+            self._draw_preview_piece(
+                (row, col),
+                kind,
+                WHITE,
+                board_left,
+                board_top,
+                tile_size,
+            )
+
+        panel = pygame.Rect(455, 135, 540, 520)
+        pygame.draw.rect(self.surface, (37, 46, 40), panel, border_radius=10)
+        total = sum(self.boss_deployment.values())
+        self._text(
+            f"Nasazeno: {total}/{self.war_deployment_limit}",
+            self.font,
+            (255, 224, 143),
+            (500, 145),
+        )
+        names = {
+            "P": "Pesec",
+            "N": "Kun",
+            "B": "Strelec",
+            "R": "Vez",
+            "Q": "Dama",
+        }
+        for index, kind in enumerate(ARMY_KINDS):
+            y = 177 + index * 66
+            self._text(
+                f"{names[kind]}: {self.boss_deployment[kind]}/"
+                f"{self.campaign.player.army[kind]}",
+                self.font,
+                (232, 235, 224),
+                (500, y + 6),
+            )
+            self._draw_button(
+                self.boss_deployment_buttons[kind]["minus"],
+                "-",
+                enabled=self.boss_deployment[kind] > 0,
+            )
+            self._draw_button(
+                self.boss_deployment_buttons[kind]["plus"],
+                "+",
+                enabled=(
+                    total < self.war_deployment_limit
+                    and self.boss_deployment[kind]
+                    < self.campaign.player.army[kind]
+                ),
+            )
+            total = sum(self.boss_deployment.values())
+
+        self._draw_button(
+            self.boss_start_button,
+            "ZAHÁJIT FINÁLNÍ BITVU"
+            if final_battle
+            else "ZAHÁJIT ZÁVĚREČNOU BITVU",
+            enabled=sum(self.boss_deployment.values()) > 0,
+        )
+        self._draw_button(
+            self.boss_cancel_button,
+            "Nelze ustoupit" if final_battle else "Zpět ke království",
+            enabled=not final_battle,
+        )
+        self._center_text(
+            self.status,
+            self.small_font,
+            (232, 202, 151),
+            (520, 703),
+        )
+
     def _draw_death_screen(self) -> None:
         self.surface.fill((20, 25, 23))
         panel = pygame.Rect(215, 205, 610, 390)
@@ -3166,6 +4204,88 @@ class ChessApp:
             self._draw_menu_button(self.death_retry_button, "Zkusit znovu")
             self.death_menu_button.y = 546
         self._draw_menu_button(self.death_menu_button, "Hlavni menu")
+
+    def _draw_opening_result(self, now: float) -> None:
+        elapsed = (
+            0
+            if self.opening_transition_started_at is None
+            else pygame.time.get_ticks() - self.opening_transition_started_at
+        )
+        progress = min(1.0, elapsed / OPENING_RESULT_DURATION_MS)
+        self.surface.fill((18, 27, 29))
+        width, height = self.surface.get_size()
+        center = (width // 2, height // 2)
+        if self.opening_transition_outcome == "win":
+            radius = round(85 + 42 * math.sin(now * 8))
+            pygame.draw.circle(self.surface, (120, 91, 188), center, radius, 3)
+            pygame.draw.circle(
+                self.surface,
+                (206, 174, 255),
+                center,
+                round(radius * 0.68),
+                2,
+            )
+            piece_size = round(190 - 145 * progress)
+            king_surface = pygame.Surface(
+                (piece_size, piece_size), pygame.SRCALPHA
+            )
+            self.renderer.draw_piece_sprite(
+                king_surface,
+                pygame.Rect(0, 0, piece_size, piece_size),
+                "K",
+                BLACK,
+            )
+            self.surface.blit(king_surface, king_surface.get_rect(center=center))
+            self._center_text(
+                "VYHRÁLI JSTE ÚVODNÍ BITVU",
+                self.title_font,
+                (255, 229, 158),
+                (center[0], 112),
+            )
+            self._center_text(
+                "Černý král se magií mění v šachovou figurku...",
+                self.font,
+                (224, 210, 250),
+                (center[0], height - 116),
+            )
+        elif self.opening_transition_outcome == "loss":
+            self.renderer.draw_piece_sprite(
+                self.surface,
+                pygame.Rect(center[0] - 80, center[1] - 80, 160, 160),
+                "K",
+                BLACK,
+            )
+            self._center_text(
+                "ČERNÝ KRÁL VYHRÁL",
+                self.title_font,
+                (239, 143, 124),
+                (center[0], 128),
+            )
+            self._center_text(
+                "Tohle byla tvoje nejlepší strategie? Zkus to znovu.",
+                self.font,
+                (245, 232, 196),
+                (center[0], height - 116),
+            )
+        else:
+            self._center_text(
+                "REMÍZA",
+                self.title_font,
+                (255, 229, 158),
+                (center[0], center[1] - 20),
+            )
+            self._center_text(
+                "Úvodní bitva se znovu začíná.",
+                self.font,
+                (224, 229, 218),
+                (center[0], center[1] + 30),
+            )
+        self._center_text(
+            "Klikni nebo stiskni Enter pro pokračování",
+            self.small_font,
+            (181, 192, 181),
+            (center[0], height - 48),
+        )
 
     def _draw_war_victory(self, now: float) -> None:
         started_at = self.war_victory_started_at
@@ -3239,8 +4359,13 @@ class ChessApp:
                     midbottom=(width // 2 - 75, height - 112)
                 ),
             )
+            surrender_text = (
+                "Černý král tě porazil"
+                if self.war_victory_is_final_battle and not self.war_victory_won
+                else "Černý král se vzdává"
+            )
             self._center_text(
-                "Černý král se vzdává",
+                surrender_text,
                 self.title_font,
                 (245, 232, 196),
                 (width // 2, 112),
@@ -3255,21 +4380,37 @@ class ChessApp:
             border_radius=18,
         )
         victory_font = pygame.font.SysFont("consolas", 76, bold=True)
-        ending_font = pygame.font.SysFont("consolas", 58, bold=True)
+        ending_font = pygame.font.SysFont("consolas", 48, bold=True)
+        if self.war_victory_is_final_battle:
+            title = "VYHRÁLI JSTE" if self.war_victory_won else "PORÁŽKA"
+            subtitle = (
+                "KRÁLOVSTVÍ JE VAŠE"
+                if self.war_victory_won
+                else "ČERNÝ KRÁL: ZKUS TO ZNOVU"
+            )
+            prompt = (
+                "Stiskni Enter pro hlavní menu"
+                if self.war_victory_won
+                else "Stiskni Enter a připrav další pokus"
+            )
+        else:
+            title = "VYHRÁLI JSTE BITVU"
+            subtitle = f"BITVA {self.campaign.rival_battle_wins}/3"
+            prompt = "Černý král: Tohle není naposledy. Stiskni Enter pro návrat."
         self._center_text(
-            "VYHRÁLI JSTE",
+            title,
             victory_font,
-            (255, 229, 158),
-            (width // 2, height // 2 - 48),
+            (255, 229, 158) if self.war_victory_won else (239, 143, 124),
+            (width // 2, height // 2 - 58),
         )
         self._center_text(
-            "KONEC",
+            subtitle,
             ending_font,
             (245, 242, 226),
-            (width // 2, height // 2 + 48),
+            (width // 2, height // 2 + 22),
         )
         self._center_text(
-            "Stiskni ESC pro hlavní menu",
+            prompt,
             self.small_font,
             (181, 192, 181),
             (width // 2, height - 88),
@@ -3374,6 +4515,14 @@ class ChessApp:
             (220, 15),
         )
         self._text(self.status, self.small_font, (246, 239, 220), (760, 15))
+        if self.campaign.final_battle_countdown is not None:
+            seconds = math.ceil(self.campaign.final_battle_countdown)
+            self._text(
+                f"Poslední bitva za {seconds // 60}:{seconds % 60:02d}",
+                self.small_font,
+                (255, 205, 140),
+                (520, 43),
+            )
 
     def _draw_king_banter(self) -> None:
         now = pygame.time.get_ticks()
@@ -3457,15 +4606,6 @@ class ChessApp:
 
         if not show_bubble:
             return
-        pygame.draw.rect(self.surface, (24, 31, 29), bubble)
-        pygame.draw.rect(self.surface, (203, 166, 102), bubble, 3)
-        pygame.draw.line(
-            self.surface,
-            (203, 166, 102),
-            (bubble.left + 10, bubble.bottom - 5),
-            (bubble.right - 10, bubble.bottom - 5),
-            2,
-        )
         label = "TY" if speaker == WHITE else "CERNY KRAL"
         translated_label = translate(label, self.language)
         translated_message = translate(message, self.language)
@@ -3482,9 +4622,23 @@ class ChessApp:
         if current:
             lines.append(current)
         line_height = self.small_font.get_linesize()
-        total_height = min(len(lines), 2) * line_height
+        total_height = len(lines) * line_height
+        bubble.height = max(bubble.height, total_height + 16)
+        if speaker == WHITE:
+            bubble.bottom = WINDOW_SIZE[1] - (
+                89 if self.active_level == 2 else 12
+            )
+        pygame.draw.rect(self.surface, (24, 31, 29), bubble)
+        pygame.draw.rect(self.surface, (203, 166, 102), bubble, 3)
+        pygame.draw.line(
+            self.surface,
+            (203, 166, 102),
+            (bubble.left + 10, bubble.bottom - 5),
+            (bubble.right - 10, bubble.bottom - 5),
+            2,
+        )
         text_y = bubble.centery - total_height // 2
-        for index, line in enumerate(lines[:2]):
+        for index, line in enumerate(lines):
             self._center_text(
                 line,
                 self.small_font,
@@ -3652,40 +4806,152 @@ class ChessApp:
 
     def _draw_pause_menu(self) -> None:
         self.surface.blit(self.pause_shade_surface, (0, 0))
-        panel = pygame.Rect(270, 190, 500, 440)
+        panel = pygame.Rect(52, 42, 936, 676)
         pygame.draw.rect(self.surface, (28, 36, 34), panel, border_radius=16)
         pygame.draw.rect(
             self.surface, (205, 169, 99), panel, width=2, border_radius=16
         )
-        self._center_text("Pauza", self.title_font, (255, 232, 177), (520, 245))
+        self._center_text("Pauza", self.title_font, (255, 232, 177), (520, 86))
+        self._center_text(
+            "Vyber režim a nastavení; režim se změní po pokračování.",
+            self.small_font,
+            (190, 199, 188),
+            (520, 121),
+        )
+        self._center_text(
+            "Režim hry",
+            self.font,
+            (255, 232, 177),
+            (305, 149),
+        )
+        level_labels = {
+            1: "Úvodní bitva 8×8",
+            2: "Království RPG 20×20",
+        }
+        for level, rect in self.pause_level_buttons.items():
+            self._draw_pause_option_button(
+                rect,
+                level_labels[level],
+                selected=self.selected_level == level,
+            )
+
+        self._center_text(
+            "Nastavení",
+            self.font,
+            (255, 232, 177),
+            (305, 241),
+        )
+        tutorial_label = (
+            "Návody: zapnuto"
+            if self.tutorial_enabled
+            else "Návody: vypnuto"
+        )
+        language_label = (
+            "Jazyk: čeština"
+            if self.language == "cs"
+            else "Language: English"
+        )
+        hardcore_label = (
+            "Hardcore: zapnuto"
+            if self.hardcore_enabled
+            else "Hardcore: vypnuto"
+        )
+        self._draw_pause_option_button(
+            self.pause_tutorial_button,
+            tutorial_label,
+            selected=self.tutorial_enabled,
+        )
+        self._draw_pause_option_button(
+            self.pause_language_button,
+            language_label,
+            selected=self.language == "en",
+        )
+        self._draw_pause_option_button(
+            self.pause_hardcore_button,
+            hardcore_label,
+            selected=self.hardcore_enabled,
+        )
+        if self.hardcore_enabled:
+            self._center_text(
+                "Vypnutí Hardcore smaže postup království.",
+                self.diplomacy_font,
+                (239, 178, 150),
+                (305, 450),
+            )
+
+        pygame.draw.line(
+            self.surface,
+            (75, 91, 82),
+            (550, 145),
+            (550, 475),
+            2,
+        )
+        self._center_text(
+            "Zvuk",
+            self.font,
+            (255, 232, 177),
+            (750, 149),
+        )
         self._center_text(
             "Hudba na pozadí",
             self.small_font,
             (245, 242, 226),
-            (520, 314),
+            (750, 187),
         )
         self._draw_audio_slider(self.pause_music_slider, self.music_volume)
         self._center_text(
             f"{round(self.music_volume * 100)} %",
             self.small_font,
             (220, 225, 214),
-            (690, self.pause_music_slider.centery),
+            (920, self.pause_music_slider.centery),
         )
         self._center_text(
             "Zvuky menu",
             self.small_font,
             (245, 242, 226),
-            (520, 402),
+            (750, 297),
         )
         self._draw_audio_slider(self.pause_sfx_slider, self.sfx_volume)
         self._center_text(
             f"{round(self.sfx_volume * 100)} %",
             self.small_font,
             (220, 225, 214),
-            (690, self.pause_sfx_slider.centery),
+            (920, self.pause_sfx_slider.centery),
+        )
+        self._center_text(
+            "Volba jiného režimu spustí novou hru tohoto typu.",
+            self.diplomacy_font,
+            (190, 199, 188),
+            (750, 411),
         )
         self._draw_menu_button(self.pause_resume_button, "Pokračovat")
         self._draw_menu_button(self.pause_menu_button, "Hlavní menu")
+
+    def _draw_pause_option_button(
+        self, rect: pygame.Rect, label: str, *, selected: bool
+    ) -> None:
+        hovered = rect.collidepoint(pygame.mouse.get_pos())
+        color = (
+            (222, 187, 112)
+            if selected
+            else (101, 125, 106)
+            if hovered
+            else (62, 78, 69)
+        )
+        pygame.draw.rect(self.surface, color, rect, border_radius=9)
+        pygame.draw.rect(
+            self.surface,
+            (235, 207, 150) if selected else (104, 120, 108),
+            rect,
+            width=2,
+            border_radius=9,
+        )
+        self._center_text(
+            label,
+            self.diplomacy_font,
+            (29, 35, 31) if selected else (241, 240, 228),
+            rect.center,
+        )
 
     def _draw_audio_slider(self, rect: pygame.Rect, volume: float) -> None:
         pygame.draw.rect(self.surface, (63, 75, 68), rect, border_radius=6)
@@ -3729,6 +4995,28 @@ class ChessApp:
             "Pridat nahodne zlato (1-1000000)",
         )
         self._draw_menu_button(self.debug_back_button, "Zpet")
+
+    def _draw_opening_debug_panel(self) -> None:
+        self._draw_menu_button(self.opening_debug_button, "Debug")
+        if not self.opening_debug_visible:
+            return
+        panel = pygame.Rect(800, 145, 210, 154)
+        pygame.draw.rect(self.surface, (24, 31, 28), panel, border_radius=8)
+        pygame.draw.rect(
+            self.surface, (205, 169, 99), panel, width=2, border_radius=8
+        )
+        self._text(
+            "Vynutit vysledek",
+            self.small_font,
+            (255, 232, 177),
+            (panel.x + 12, panel.y + 6),
+        )
+        for key, label in (
+            ("white", "Bílý vyhraje"),
+            ("black", "Černý vyhraje"),
+            ("draw", "Remíza"),
+        ):
+            self._draw_menu_button(self.opening_debug_buttons[key], label)
 
     def _draw_difficulty_button(
         self, rect: pygame.Rect, label: str, *, selected: bool

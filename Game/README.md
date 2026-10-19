@@ -21,9 +21,9 @@ Zavislosti jsou uvedene v `requirements.txt`.
 
 Po spusteni se zobrazi hlavni menu. Z nej lze spustit/pokracovat ve hre,
 zacit novou hru nebo aplikaci ukoncit. Behem partie otevre tlacitko **Pauza**
-nebo klavesa **Esc** pauzu; pokud je vybrana figurka, prvni Esc vyber jen
-zrusi. V pauze lze pokracovat, vratit se do hlavniho menu a nastavit hlasitost
-hudby na pozadi i zvuku menu; obe hlasitosti se ulozi pro dalsi spusteni.
+nebo klavesa **Esc** pauzu; v uvodni bitve prvni Esc zrusi vyber figurky.
+Pauza zastavi herni cas. V pauze lze pokracovat, vratit se do hlavniho menu
+a nastavit hlasitost hudby na pozadi i zvuku menu; obe hlasitosti se ulozi.
 
 ## Kampan
 
@@ -35,7 +35,12 @@ hudby na pozadi i zvuku menu; obe hlasitosti se ulozi pro dalsi spusteni.
   spustit primo z menu; tlacitko
   **Restartovat kralovstvi** zalozi a hned spusti novou kampan. Tlacitko
   **Nova hra** spusti vybranou cast i behem rozehrane partie.
-- Po vitezstvi v uvodni valce sachove figurky okamzite zmizi a spusti se
+- Pri uvodni bitve tlacitko **Debug** vpravo nabizi vynuceni bileho viteze,
+  cerneho viteze nebo remizy. Pet opakovani stejne pozice znamena remizu.
+  Prohra cernemu kralem vyvola jeho hlasku a bitva se spusti znovu; remiza
+  rovnou opakuje uvodni bitvu.
+- Po vitezstvi v uvodni bitve se zobrazi animace, ve ktere se cerny kral
+  pomoci magie zmensi na sachovou figurku, a teprve potom se spusti
   standardni zacatek kampane jako pri vyberu kralovstvi v menu; kral se tedy
   objevi na vychozim poli kampane a zustava pocatecni rozpocet i mapa.
   Zobrazeni zacne priblizenim na bileho krale a behem 4,5 sekundy se plynule
@@ -93,6 +98,11 @@ hudby na pozadi i zvuku menu; obe hlasitosti se ulozi pro dalsi spusteni.
   cerneho bota; vybere se velikost oddilu (1-8) a nasadi nejsilnejsi jednotky.
   Padem armady souper prijde o jednotky,
   prezivsi se vraci a vitez ziska 250 minci navic pro hrace.
+- Valka s cernym kralem ma tri samostatne bitvy; po kazde vyhre se kral vrati
+  s vetsi armadou a silnejsim botem. Po treti vyhre bezi v kralovstvi
+  petiminutove odpocitavani, pote se otevre vyber pro finalni bitvu 8 x 8.
+  Cerny kral v ni nasadi dve veze, dva jezdce, dva strelce a damu; kralove
+  bojuji az do porazky. Vyhra v teto bitve kampan ukonci.
 - Hrac i bot rozvijeji kralovstvi soucasne. Bot postupne bez placeni stavi farmy,
   mesto, zbrojnici a buduje i vylepsuje armadu; jeho kral poklady nesleduje.
   Po vystaveni mesta se objevi dva pesaci, pozdeji az tri. Zustanou stat;
@@ -107,9 +117,26 @@ hudby na pozadi i zvuku menu; obe hlasitosti se ulozi pro dalsi spusteni.
   Stara ulozena kralovstvi se pri prechodu na novy system vrati se souperem
   bez rozvinutych budov a armady, aby se zpomaleni projevilo hned.
 - Po kralovstvi pronasleduji kralovy dve az tri pohyblive hlidky. Pohybuji se
-  primo za kralem, pri prvnim dosahu hned zautoci za 200 HP a dalsi utok
+  po ctvercove mrizce a neprochazeji prekazkami ani okrajem mapy; pri prvnim
+  dosahu hned zautoci za tretinu maximalniho zdravi krale a dalsi utok
   provedou po trech sekundach. Kral je muze porazit jednim zasahem; po porazce
-  se po jedne sekunde znovu objevi u mesta.
+  se po jedne sekunde znovu objevi u mesta. Hlidky pouzivaji texturu pesce.
+  Otevreni obrazovky obchodu zastavi cas kampane, prijem i utoky hlidek, takze
+  kral nemuze behem nakupu zemrit bez cinnosti.
+- Vlevo vedle mapy je kompaktni diplomaticky chat; mapa je posunuta do vlastniho
+  vyrezu, takze ovladaci prvky nezakryvaji policka. Kral odpoved postupne pise
+  3 az 5 sekund. Nabizene odpovedi ovlivnuji jeho duveru; opakovane hrozby mohou
+  vyvolat valku. Po vyhlaseni valky kral projde ke zbrojnici a hrac vybere az
+  osm vlastnich jednotek z mestske armady pro zaverecnou bitvu proti souperi.
+  Dialogovy system bezi lokalne a nevyzaduje pripojeni ani externi jazykovy
+  model. Klávesa **Esc** v království pozastaví čas, pohyb
+  hlidek i prijem z farem; po pokracovani se cas znovu rozbehne.
+- V pauze lze také změnit jazyk, návody, Hardcore a vybraný režim hry.
+  Režim se přepne až po stisku **Pokračovat**; vypnutí Hardcore resetuje
+  království stejně jako v hlavním menu. Pauza i hlavní menu zastaví tahy bota
+  a běh kampaně.
+- Restart tlacitkem **Restartovat kralovstvi** zacina novou kampan a resetuje
+  i odemcene achievementy a jejich postup.
   Mince a prijem z farem patri pouze hraci. Obtiznost ridi i hloubku tahu bota.
 - Ekonomicke tahy nelze vratit.
 - Behem obou casti se v pravem dolnim rohu postupne zobrazuji kratke napovedy

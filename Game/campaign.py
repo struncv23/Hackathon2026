@@ -21,7 +21,7 @@ CITY_COST = 3_600
 RAIDER_SPEED = 0.9
 RAIDER_ATTACK_INTERVAL = 3.0
 RAIDER_RESPAWN_DELAY = 1.0
-RAIDER_DAMAGE = 200
+RAIDER_DAMAGE_FRACTION = 1 / 3
 KING_RAIDER_KILL_COOLDOWN = 1.0
 RAIDER_MIN_SPACING = 1.0
 POTION_HEAL = 150
@@ -66,6 +66,7 @@ class Raider:
     row: float
     col: float
     attack_cooldown: float = 0.0
+    target_tile: tuple[int, int] | None = None
 
 
 @dataclass
@@ -93,6 +94,14 @@ class Campaign:
     king_potion_heals: int = 0
     unlocked_achievements: list[str] = field(default_factory=list)
     visited_campaign_squares: list[tuple[int, int]] = field(default_factory=list)
+    diplomacy_trust: int = 0
+    diplomacy_history: list[tuple[str, str]] = field(default_factory=list)
+    rival_war_declared: bool = False
+    rival_war_won: bool = False
+    rival_battle_wins: int = 0
+    final_battle_countdown: float | None = None
+    final_battle_pending: bool = False
+    final_battle_complete: bool = False
 
     def faction(self, color: str) -> Faction:
         return self.player if color == WHITE else self.rival
@@ -214,6 +223,57 @@ class Campaign:
             faction.farm_income_fraction -= total_earned
         return total_earned
 
+    def begin_diplomacy(self, choice: int) -> tuple[str, str]:
+        choices = (
+            ("Nabízím mírovou dohodu", 2),
+            ("Nabízím obchodní smlouvu", 1),
+            ("Žádám o příměří", 0),
+            ("Vyhrožuji válkou", -4),
+        )
+        if (
+            isinstance(choice, bool)
+            or not isinstance(choice, int)
+            or not 0 <= choice < len(choices)
+        ):
+            raise ValueError(f"Invalid diplomacy choice: {choice}")
+
+        player_line, trust_change = choices[choice]
+        self.diplomacy_history.append(("player", player_line))
+        self.diplomacy_trust = max(
+            -10, min(10, self.diplomacy_trust + trust_change)
+        )
+
+        self.diplomacy_history = self.diplomacy_history[-11:]
+        return player_line, self._diplomacy_response()
+
+    def _diplomacy_response(self) -> str:
+        if self.rival_war_declared:
+            return "Moje vojsko už táhne. O válce není co vyjednávat."
+        if self.diplomacy_trust <= -4:
+            return "Dost bylo urážek. Vyhlašuji ti válku; moje vojsko už táhne!"
+        if self.diplomacy_trust >= 2:
+            return "Přijímám mírovou dohodu. Obě království mohou prosperovat."
+        if self.diplomacy_trust >= 0:
+            return "Příměří zatím platí. Důvěru ale musíme teprve vybudovat."
+        return "Tvoje slova zvyšují napětí. Zkus ještě změnit svůj přístup."
+
+    def finish_diplomacy(self) -> str:
+        response = self._diplomacy_response()
+        if not self.rival_war_declared and self.diplomacy_trust <= -4:
+            self.rival_war_declared = True
+            self.rival.city = True
+            self.rival.armory = True
+            self.rival.army["P"] = max(3, self.rival.army["P"])
+            self.raiders_started_at = self.realtime_seconds
+            self.potions_active = True
+        self.diplomacy_history.append(("king", response))
+        self.diplomacy_history = self.diplomacy_history[-12:]
+        return response
+
+    def answer_diplomacy(self, choice: int) -> tuple[str, str]:
+        player_line, _ = self.begin_diplomacy(choice)
+        return player_line, self.finish_diplomacy()
+
     def advance_realtime(
         self,
         elapsed_seconds: float,
@@ -237,6 +297,7 @@ class Campaign:
                 (5.5, center + 1.5),
                 (6.5, center + 0.5),
             )
+            blocked = blocked_tiles or set()
             required_raiders = (
                 3
                 if self.realtime_seconds - self.raiders_started_at >= 45
@@ -254,7 +315,6 @@ class Campaign:
             ]
             occupied = [(raider.row, raider.col) for raider in self.raiders]
             for _ in due_respawns:
-                blocked = blocked_tiles or set()
                 available_points = [
                     (row + 0.5, col + 0.5)
                     for row in range(board_size)
@@ -281,6 +341,7 @@ class Campaign:
                 available_points = [
                     point
                     for point in spawn_points
+                    if (int(point[0]), int(point[1])) not in blocked
                     if all(
                         (point[0] - row) ** 2 + (point[1] - col) ** 2
                         >= RAIDER_MIN_SPACING**2
@@ -309,6 +370,7 @@ class Campaign:
         blocked_tiles: set[tuple[int, int]] | None = None,
         board_size: int = 20,
         king_motion: tuple[tuple[int, int], tuple[int, int]] | None = None,
+        king_max_health: int = 30_000,
     ) -> int:
         if elapsed_seconds <= 0 or king_square is None:
             return 0
@@ -318,6 +380,8 @@ class Campaign:
         king_row, king_col = king_square[0] + 0.5, king_square[1] + 0.5
         damage = 0
         for raider in self.raiders:
+            raider.row = min(max(raider.row, 0.5), board_size - 0.5)
+            raider.col = min(max(raider.col, 0.5), board_size - 0.5)
             raider.attack_cooldown = max(
                 0.0, raider.attack_cooldown - elapsed_seconds
             )
@@ -347,52 +411,114 @@ class Campaign:
                         + (raider.col - closest_col) ** 2
                     ) ** 0.5
                     attack_distance = min(attack_distance, motion_distance)
-            if attack_distance <= 1.2:
+            raider_tile = (int(raider.row), int(raider.col))
+            if (
+                attack_distance <= 1.2
+                or abs(raider_tile[0] - king_square[0])
+                + abs(raider_tile[1] - king_square[1])
+                == 1
+            ):
                 if raider.attack_cooldown <= 0:
-                    damage += RAIDER_DAMAGE
+                    damage += max(1, round(king_max_health * RAIDER_DAMAGE_FRACTION))
                     raider.attack_cooldown = RAIDER_ATTACK_INTERVAL
                 continue
 
             current = (int(raider.row), int(raider.col))
-            options = (
-                (current[0] - 1, current[1]),
-                (current[0] + 1, current[1]),
-                (current[0], current[1] - 1),
-                (current[0], current[1] + 1),
-            )
-            next_tiles = sorted(
-                (
-                    tile
-                    for tile in options
-                    if tile in distances and tile not in blocked
-                ),
-                key=lambda tile: distances[tile],
-            )
-            for next_tile in next_tiles:
-                target_row, target_col = next_tile
-                target_row += 0.5
-                target_col += 0.5
-                step_row = target_row - raider.row
-                step_col = target_col - raider.col
-                step_distance = (step_row * step_row + step_col * step_col) ** 0.5
-                if step_distance == 0:
+            target_tile = raider.target_tile
+            if (
+                target_tile is not None
+                and (
+                    target_tile not in distances
+                    or target_tile in blocked
+                    or (
+                        target_tile != current
+                        and abs(target_tile[0] - current[0])
+                        + abs(target_tile[1] - current[1])
+                        != 1
+                    )
+                )
+            ):
+                target_tile = None
+                raider.target_tile = None
+
+            if target_tile is None:
+                current_center = (current[0] + 0.5, current[1] + 0.5)
+                center_delta_row = current_center[0] - raider.row
+                center_delta_col = current_center[1] - raider.col
+                center_distance = (
+                    center_delta_row * center_delta_row
+                    + center_delta_col * center_delta_col
+                ) ** 0.5
+                if center_distance > 1e-9:
+                    travel = min(center_distance, RAIDER_SPEED * elapsed_seconds)
+                    new_row = (
+                        raider.row + center_delta_row / center_distance * travel
+                    )
+                    new_col = (
+                        raider.col + center_delta_col / center_distance * travel
+                    )
+                    if not self._raider_spacing_is_clear(
+                        raider, new_row, new_col
+                    ):
+                        continue
+                    raider.row = new_row
+                    raider.col = new_col
                     continue
-                travel = min(step_distance, RAIDER_SPEED * elapsed_seconds)
-                new_row = raider.row + step_row / step_distance * travel
-                new_col = raider.col + step_col / step_distance * travel
-                if (int(new_row), int(new_col)) in blocked:
+
+                options = (
+                    (current[0] - 1, current[1]),
+                    (current[0] + 1, current[1]),
+                    (current[0], current[1] - 1),
+                    (current[0], current[1] + 1),
+                )
+                next_tiles = sorted(
+                    (
+                        tile
+                        for tile in options
+                        if tile in distances and tile not in blocked
+                    ),
+                    key=lambda tile: distances[tile],
+                )
+                if not next_tiles:
                     continue
-                if any(
-                    (new_row - other.row) ** 2 + (new_col - other.col) ** 2
-                    < RAIDER_MIN_SPACING**2
-                    for other in self.raiders
-                    if other is not raider
-                ):
-                    continue
-                raider.row = new_row
-                raider.col = new_col
-                break
+                target_tile = next_tiles[0]
+                raider.target_tile = target_tile
+
+            target_row, target_col = target_tile
+            target_row += 0.5
+            target_col += 0.5
+            step_row = target_row - raider.row
+            step_col = target_col - raider.col
+            step_distance = (step_row * step_row + step_col * step_col) ** 0.5
+            if step_distance == 0:
+                raider.target_tile = None
+                continue
+            travel = min(step_distance, RAIDER_SPEED * elapsed_seconds)
+            new_row = raider.row + step_row / step_distance * travel
+            new_col = raider.col + step_col / step_distance * travel
+            if not (
+                0.5 <= new_row <= board_size - 0.5
+                and 0.5 <= new_col <= board_size - 0.5
+            ):
+                raider.target_tile = None
+                continue
+            if not self._raider_spacing_is_clear(raider, new_row, new_col):
+                continue
+            raider.row = new_row
+            raider.col = new_col
+            if travel == step_distance:
+                raider.target_tile = None
         return damage
+
+    def _raider_spacing_is_clear(
+        self, raider: Raider, row: float, col: float
+    ) -> bool:
+        return all(
+            (row - other.row) ** 2 + (col - other.col) ** 2
+            >= RAIDER_MIN_SPACING**2
+            for other in self.raiders
+            if other is not raider
+        )
 
     @staticmethod
     def _raider_path_distances(
@@ -507,6 +633,13 @@ class Campaign:
             )
             rival.coins = 0
             rival.farm_income_fraction = 0.0
+            saved_war_won = bool(data.get("rival_war_won", False))
+            saved_battle_wins = cls._read_nonnegative_int(
+                data.get("rival_battle_wins", 0)
+            )
+            if saved_war_won and "rival_battle_wins" not in data:
+                saved_war_won = False
+                saved_battle_wins = 1
             return cls(
                 day=max(1, int(data.get("day", 1))),
                 player=cls._faction_from_dict(data.get("player")),
@@ -581,6 +714,22 @@ class Campaign:
                 visited_campaign_squares=cls._read_campaign_squares(
                     data.get("visited_campaign_squares")
                 ),
+                diplomacy_trust=max(
+                    -10, min(10, int(data.get("diplomacy_trust", 0)))
+                ),
+                diplomacy_history=cls._read_diplomacy_history(
+                    data.get("diplomacy_history")
+                ),
+                rival_war_declared=bool(data.get("rival_war_declared", False)),
+                rival_war_won=saved_war_won,
+                rival_battle_wins=min(
+                    3, saved_battle_wins
+                ),
+                final_battle_countdown=cls._read_optional_nonnegative_float(
+                    data.get("final_battle_countdown")
+                ),
+                final_battle_pending=bool(data.get("final_battle_pending", False)),
+                final_battle_complete=bool(data.get("final_battle_complete", False)),
             )
         except (TypeError, ValueError):
             return cls()
@@ -611,18 +760,45 @@ class Campaign:
                 cooldown = float(item.get("attack_cooldown", 0.0))
             except (KeyError, TypeError, ValueError):
                 continue
+            target = item.get("target_tile")
+            target_tile = (
+                tuple(target)
+                if isinstance(target, (list, tuple))
+                and len(target) == 2
+                and all(
+                    isinstance(part, int) and 0 <= part < 20
+                    for part in target
+                )
+                else None
+            )
             if all(
                 isfinite(number) and abs(number) < 1_000_000
                 for number in (row, col, cooldown)
-            ):
+            ) and 0.5 <= row <= 19.5 and 0.5 <= col <= 19.5:
                 raiders.append(
                     Raider(
                         row=row,
                         col=col,
                         attack_cooldown=max(0.0, min(RAIDER_ATTACK_INTERVAL, cooldown)),
+                        target_tile=target_tile,
                     )
                 )
         return raiders
+
+    @staticmethod
+    def _read_diplomacy_history(value: object) -> list[tuple[str, str]]:
+        if not isinstance(value, list):
+            return []
+        messages = []
+        for item in value[-12:]:
+            if (
+                isinstance(item, (list, tuple))
+                and len(item) == 2
+                and item[0] in ("player", "king")
+                and isinstance(item[1], str)
+            ):
+                messages.append((item[0], item[1]))
+        return messages
 
     @staticmethod
     def _read_respawn_times(value: object) -> list[float]:
