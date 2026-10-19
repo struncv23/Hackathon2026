@@ -102,6 +102,7 @@ ENGLISH: dict[str, str] = {
     "Šachy — základ": "Chess — basics",
     "Sachy — zaklad": "Chess — basics",
     "Šachy — základ": "Chess — basics",
+    "Šachová bitva": "Chess Battle",
     "Hraješ za bílé proti botovi, který hraje za černé": "You play as White against the Black AI",
     "Obtížnost bota (orientační chess.com Elo)": "AI difficulty (approximate chess.com Elo)",
     "Vyber část hry": "Choose a game mode",

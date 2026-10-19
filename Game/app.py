@@ -69,7 +69,7 @@ from .textures import SceneTextures
 
 CAMPAIGN_INTRO_ZOOM_DURATION_MS = 4500
 CAMPAIGN_INTRO_START_ZOOM = 2.0
-CAMERA_FOLLOW_SPEED = 14.0
+CAMERA_FOLLOW_SPEED = 8.0
 WAR_VICTORY_SURRENDER_DURATION_MS = 4200
 DIPLOMACY_REPLY_MIN_MS = 3000
 DIPLOMACY_REPLY_MAX_MS = 5000
@@ -100,7 +100,7 @@ class ChessApp:
     def __init__(self, effects: Effects | None = None) -> None:
         pygame.init()
         self._initialize_audio()
-        pygame.display.set_caption("Šachy — základ")
+        pygame.display.set_caption("Šachová bitva")
         self.windowed_size = WINDOW_SIZE
         self.fullscreen = False
         self.surface = pygame.display.set_mode(WINDOW_SIZE)
@@ -125,7 +125,7 @@ class ChessApp:
         self.language = load_language()
         self.tutorial_enabled = load_tutorials_enabled()
         self.hardcore_enabled = load_hardcore_enabled()
-        pygame.display.set_caption(translate("Šachy — základ", self.language))
+        pygame.display.set_caption(translate("Šachová bitva", self.language))
         self.tutorial_seen: set[str] = set()
         self.tutorial_queue: list[tuple[str, str]] = []
         self.tutorial_active: tuple[str, str] | None = None
@@ -180,17 +180,21 @@ class ChessApp:
         self.menu_new_game_button = pygame.Rect(380, 522, 280, 54)
         self.menu_quit_button = pygame.Rect(380, 589, 280, 54)
         self.achievements_back_button = pygame.Rect(370, 680, 300, 48)
-        self.debug_menu_button = pygame.Rect(790, 164, 210, 40)
-        self.debug_add_gold_button = pygame.Rect(370, 420, 300, 56)
-        self.debug_add_random_gold_button = pygame.Rect(370, 492, 300, 56)
-        self.debug_back_button = pygame.Rect(370, 564, 300, 56)
-        self.opening_debug_button = pygame.Rect(810, 108, 190, 38)
-        self.opening_debug_buttons = {
-            "white": pygame.Rect(810, 170, 190, 38),
-            "black": pygame.Rect(810, 214, 190, 38),
-            "draw": pygame.Rect(810, 258, 190, 38),
+        self.pause_debug_button = pygame.Rect(916, 680, 60, 26)
+        self.pause_debug_panel = pygame.Rect(688, 426, 286, 152)
+        self.pause_debug_outcome_buttons = {
+            "white": pygame.Rect(700, 462, 262, 30),
+            "black": pygame.Rect(700, 498, 262, 30),
+            "draw": pygame.Rect(700, 534, 262, 30),
         }
-        self.opening_debug_visible = False
+        self.pause_debug_gold_button = pygame.Rect(700, 472, 262, 34)
+        self.pause_debug_random_gold_button = pygame.Rect(700, 516, 262, 34)
+        self.opening_debug_buttons = {
+            "white": self.pause_debug_outcome_buttons["white"],
+            "black": self.pause_debug_outcome_buttons["black"],
+            "draw": self.pause_debug_outcome_buttons["draw"],
+        }
+        self.pause_debug_visible = False
         self.tutorial_toggle_button = pygame.Rect(790, 20, 210, 40)
         self.language_toggle_button = pygame.Rect(790, 68, 210, 40)
         self.hardcore_toggle_button = pygame.Rect(790, 116, 210, 40)
@@ -1122,7 +1126,7 @@ class ChessApp:
             if key in (pygame.K_l, pygame.K_ESCAPE):
                 self.screen = self.achievement_return_screen
             return
-        if key == pygame.K_l and self.screen in ("game", "menu", "debug"):
+        if key == pygame.K_l and self.screen in ("game", "menu"):
             self.achievement_return_screen = self.screen
             self.screen = "achievements"
             return
@@ -1140,10 +1144,6 @@ class ChessApp:
         if self.screen == "menu":
             if key in (pygame.K_RETURN, pygame.K_SPACE):
                 self._start_or_continue()
-            return
-        if self.screen == "debug":
-            if key == pygame.K_ESCAPE:
-                self.screen = "menu"
             return
         if (
             self.diplomacy_reply_text is not None
@@ -1238,6 +1238,7 @@ class ChessApp:
             self.pause_tutorial_button,
             self.pause_language_button,
             self.pause_hardcore_button,
+            self.pause_debug_button,
             self.pause_resume_button,
             self.pause_menu_button,
             self.pause_music_slider.inflate(0, 20),
@@ -1262,9 +1263,39 @@ class ChessApp:
             self._toggle_language()
         elif self.pause_hardcore_button.collidepoint(position):
             self._toggle_hardcore(from_pause=True)
+        elif self.pause_debug_button.collidepoint(position):
+            self.pause_debug_visible = not self.pause_debug_visible
+        elif self.pause_debug_visible and self.active_level == 1:
+            debug_outcomes = {
+                "white": "win",
+                "black": "loss",
+                "draw": "draw",
+            }
+            outcome = next(
+                (
+                    result
+                    for option, result in debug_outcomes.items()
+                    if self.pause_debug_outcome_buttons[option].collidepoint(
+                        position
+                    )
+                ),
+                None,
+            )
+            if outcome is not None:
+                self._finish_opening_match(outcome)
+        elif self.pause_debug_visible and self.active_level == 2:
+            if self.pause_debug_gold_button.collidepoint(position):
+                self.campaign.player.coins += 10_000
+                self._mark_campaign_dirty()
+                self._flush_campaign_save(force=True)
+            elif self.pause_debug_random_gold_button.collidepoint(position):
+                self.campaign.player.coins += random.randint(1, 1_000_000)
+                self._mark_campaign_dirty()
+                self._flush_campaign_save(force=True)
         elif self.pause_resume_button.collidepoint(position):
             self._resume_from_pause()
         elif self.pause_menu_button.collidepoint(position):
+            self.pause_debug_visible = False
             self.screen = "menu"
         else:
             for name, slider in (
@@ -1277,6 +1308,7 @@ class ChessApp:
                     return
 
     def _resume_from_pause(self) -> None:
+        self.pause_debug_visible = False
         if self.selected_level != self.active_level:
             self._start_new_game(reset_campaign=False, abandon_current=True)
         self.screen = (
@@ -1357,20 +1389,6 @@ class ChessApp:
         if self.screen == "pause":
             self._handle_pause_click(position)
             return
-        if self.screen == "game" and self.active_level == 1:
-            if self.opening_debug_button.collidepoint(position):
-                self.opening_debug_visible = not self.opening_debug_visible
-                return
-            if self.opening_debug_visible:
-                debug_outcomes = {
-                    "white": "win",
-                    "black": "loss",
-                    "draw": "draw",
-                }
-                for option, button in self.opening_debug_buttons.items():
-                    if button.collidepoint(position):
-                        self._finish_opening_match(debug_outcomes[option])
-                        return
         if self.screen == "death":
             if (
                 not self.hardcore_enabled
@@ -1400,7 +1418,6 @@ class ChessApp:
                 self.menu_play_button,
                 self.menu_new_game_button,
                 self.menu_quit_button,
-                self.debug_menu_button,
                 self.tutorial_toggle_button,
                 self.language_toggle_button,
                 self.hardcore_toggle_button,
@@ -1434,8 +1451,6 @@ class ChessApp:
                 self._toggle_language()
             elif self.hardcore_toggle_button.collidepoint(position):
                 self._toggle_hardcore()
-            elif self.debug_menu_button.collidepoint(position):
-                self.screen = "debug"
             elif self.menu_play_button.collidepoint(position):
                 self._start_or_continue()
             elif self.menu_new_game_button.collidepoint(position):
@@ -1449,19 +1464,6 @@ class ChessApp:
             elif self.menu_quit_button.collidepoint(position):
                 self.running = False
             return
-        if self.screen == "debug":
-            if self.debug_add_gold_button.collidepoint(position):
-                self.campaign.player.coins += 10_000
-                self._mark_campaign_dirty()
-                self._flush_campaign_save(force=True)
-            elif self.debug_add_random_gold_button.collidepoint(position):
-                self.campaign.player.coins += random.randint(1, 1_000_000)
-                self._mark_campaign_dirty()
-                self._flush_campaign_save(force=True)
-            elif self.debug_back_button.collidepoint(position):
-                self.screen = "menu"
-            return
-
         if self.shop_menu is not None and self.active_level == 2 and not self.campaign_battle_active:
             self._handle_shop_screen_click(position)
             return
@@ -1885,7 +1887,7 @@ class ChessApp:
         self.opening_transition_outcome = None
         self.opening_transition_started_at = None
         self.opening_position_counts.clear()
-        self.opening_debug_visible = False
+        self.pause_debug_visible = False
         self.boss_deployment_active = False
         self.war_deployment_active = False
         self.war_march_path = None
@@ -2680,7 +2682,7 @@ class ChessApp:
     def _toggle_language(self) -> None:
         self.language = "en" if self.language == "cs" else "cs"
         save_language(self.language)
-        pygame.display.set_caption(translate("Šachy — základ", self.language))
+        pygame.display.set_caption(translate("Šachová bitva", self.language))
         self._rendered_text_cache.clear()
 
     def _toggle_hardcore(self, *, from_pause: bool = False) -> None:
@@ -3750,9 +3752,6 @@ class ChessApp:
             self._draw_menu()
             self._draw_tutorial()
             return
-        if self.screen == "debug":
-            self._draw_debug_menu()
-            return
         if self.screen == "achievements":
             self._draw_achievements()
             return
@@ -3858,8 +3857,6 @@ class ChessApp:
             self._draw_campaign_hud()
         else:
             self._draw_sidebar()
-            if self.active_level == 1 and not self.campaign_battle_active:
-                self._draw_opening_debug_panel()
         if self.screen != "pause":
             self._draw_tutorial()
         if self.pending_promotion:
@@ -4796,7 +4793,7 @@ class ChessApp:
 
         title = pygame.font.SysFont("consolas", 58, bold=True)
         subtitle = pygame.font.SysFont("consolas", 20)
-        self._center_text("ŠACHY", title, (255, 232, 177), (520, 150))
+        self._center_text("Šachová bitva", title, (255, 232, 177), (520, 150))
         self._center_text(
             "Hraješ za bílé proti botovi, který hraje za černé",
             subtitle,
@@ -4928,7 +4925,6 @@ class ChessApp:
             (245, 245, 235),
             self.hardcore_toggle_button.center,
         )
-        self._draw_menu_button(self.debug_menu_button, "Debug")
         hint = pygame.font.SysFont("consolas", 16)
         self._center_text(
             "V první části vyhraješ jen zabitím černého krále.",
@@ -5064,8 +5060,79 @@ class ChessApp:
             (190, 199, 188),
             (750, 411),
         )
+        if self.pause_debug_visible:
+            self._draw_pause_debug_panel()
         self._draw_menu_button(self.pause_resume_button, "Pokračovat")
         self._draw_menu_button(self.pause_menu_button, "Hlavní menu")
+        debug_button_color = (
+            (222, 187, 112)
+            if self.pause_debug_visible
+            else (101, 125, 106)
+            if self.pause_debug_button.collidepoint(pygame.mouse.get_pos())
+            else (62, 78, 69)
+        )
+        pygame.draw.rect(
+            self.surface,
+            debug_button_color,
+            self.pause_debug_button,
+            border_radius=5,
+        )
+        self._center_text(
+            "Debug",
+            self.diplomacy_font,
+            (29, 35, 31) if self.pause_debug_visible else (241, 240, 228),
+            self.pause_debug_button.center,
+        )
+
+    def _draw_pause_debug_panel(self) -> None:
+        pygame.draw.rect(
+            self.surface,
+            (24, 31, 28),
+            self.pause_debug_panel,
+            border_radius=8,
+        )
+        pygame.draw.rect(
+            self.surface,
+            (205, 169, 99),
+            self.pause_debug_panel,
+            width=2,
+            border_radius=8,
+        )
+        if self.active_level == 1:
+            self._text(
+                "Vynutit vysledek",
+                self.diplomacy_font,
+                (255, 232, 177),
+                (self.pause_debug_panel.x + 12, self.pause_debug_panel.y + 8),
+            )
+            for option, label in (
+                ("white", "Bílý vyhraje"),
+                ("black", "Černý vyhraje"),
+                ("draw", "Remíza"),
+            ):
+                self._draw_pause_option_button(
+                    self.pause_debug_outcome_buttons[option],
+                    label,
+                    selected=False,
+                )
+            return
+
+        self._text(
+            f"Zlato v kralovstvi: {self.campaign.player.coins}",
+            self.diplomacy_font,
+            (255, 232, 177),
+            (self.pause_debug_panel.x + 12, self.pause_debug_panel.y + 10),
+        )
+        self._draw_pause_option_button(
+            self.pause_debug_gold_button,
+            "Pridat 10000 zlata",
+            selected=False,
+        )
+        self._draw_pause_option_button(
+            self.pause_debug_random_gold_button,
+            "Pridat nahodne zlato (1-1000000)",
+            selected=False,
+        )
 
     def _draw_pause_option_button(
         self, rect: pygame.Rect, label: str, *, selected: bool
@@ -5105,58 +5172,6 @@ class ChessApp:
             (rect.left + round(rect.width * volume), rect.centery),
             10,
         )
-
-    def _draw_debug_menu(self) -> None:
-        self.surface.fill((28, 36, 34))
-        self._center_text(
-            "DEBUG",
-            self.title_font,
-            (255, 232, 177),
-            (520, 285),
-        )
-        self._center_text(
-            "Zlato v kralovstvi:",
-            self.small_font,
-            (245, 242, 226),
-            (520, 350),
-        )
-        self._center_text(
-            str(self.campaign.player.coins),
-            self.font,
-            (255, 232, 177),
-            (520, 382),
-        )
-        self._draw_menu_button(
-            self.debug_add_gold_button,
-            "Pridat 10000 zlata",
-        )
-        self._draw_menu_button(
-            self.debug_add_random_gold_button,
-            "Pridat nahodne zlato (1-1000000)",
-        )
-        self._draw_menu_button(self.debug_back_button, "Zpet")
-
-    def _draw_opening_debug_panel(self) -> None:
-        self._draw_menu_button(self.opening_debug_button, "Debug")
-        if not self.opening_debug_visible:
-            return
-        panel = pygame.Rect(800, 145, 210, 154)
-        pygame.draw.rect(self.surface, (24, 31, 28), panel, border_radius=8)
-        pygame.draw.rect(
-            self.surface, (205, 169, 99), panel, width=2, border_radius=8
-        )
-        self._text(
-            "Vynutit vysledek",
-            self.small_font,
-            (255, 232, 177),
-            (panel.x + 12, panel.y + 6),
-        )
-        for key, label in (
-            ("white", "Bílý vyhraje"),
-            ("black", "Černý vyhraje"),
-            ("draw", "Remíza"),
-        ):
-            self._draw_menu_button(self.opening_debug_buttons[key], label)
 
     def _draw_difficulty_button(
         self, rect: pygame.Rect, label: str, *, selected: bool
